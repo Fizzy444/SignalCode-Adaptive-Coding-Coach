@@ -1,8 +1,11 @@
 import type { Language, Problem } from "./types";
 
 const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-const API_URL = import.meta.env.VITE_API_URL || `http://${host}:8000`;
-const WS_URL = import.meta.env.VITE_WS_URL || `ws://${host}:8000`;
+const isNetworkHost = host !== "localhost" && host !== "127.0.0.1";
+const envApi = import.meta.env.VITE_API_URL;
+const envWs = import.meta.env.VITE_WS_URL;
+const API_URL = (isNetworkHost && envApi?.includes("localhost")) ? `http://${host}:8000` : (envApi || `http://${host}:8000`);
+const WS_URL = (isNetworkHost && envWs?.includes("localhost")) ? `ws://${host}:8000` : (envWs || `ws://${host}:8000`);
 
 export async function createSession(language: Language, problemId?: string): Promise<{
   session_id: string;

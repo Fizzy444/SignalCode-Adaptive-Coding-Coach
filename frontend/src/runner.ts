@@ -1,7 +1,9 @@
 import type { CodeRunResult, Language } from "./types";
 
 const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-const API_URL = import.meta.env.VITE_API_URL || `http://${host}:8000`;
+const isNetworkHost = host !== "localhost" && host !== "127.0.0.1";
+const envApi = import.meta.env.VITE_API_URL;
+const API_URL = (isNetworkHost && envApi?.includes("localhost")) ? `http://${host}:8000` : (envApi || `http://${host}:8000`);
 
 export async function runCode(
   language: Language,

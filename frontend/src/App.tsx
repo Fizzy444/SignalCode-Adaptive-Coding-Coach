@@ -32,6 +32,7 @@ export default function App() {
   const [report, setReport] = useState<Report | null>(null);
   const [cameraAllowed, setCameraAllowed] = useState(() => Boolean(savedSession?.cameraAllowed));
   const [returnView, setReturnView] = useState<"home" | "library">(() => savedSession?.returnView || "home");
+  const [mobileTab, setMobileTab] = useState<"problem" | "editor" | "coach">("problem");
   const [leftWidth, setLeftWidth] = useState(() => Number(localStorage.getItem("sc_left_width")) || 300);
   const [rightWidth, setRightWidth] = useState(() => Number(localStorage.getItem("sc_right_width")) || 320);
   const [bottomHeight, setBottomHeight] = useState(() => Number(localStorage.getItem("sc_bottom_height")) || 240);
@@ -331,7 +332,7 @@ export default function App() {
               Browse Problems →
             </button>
           </div>
-          <p className="hero-meta">
+          <p className="hero-meta desktop-only">
             <label>
               <input
                 type="checkbox"
@@ -411,7 +412,7 @@ export default function App() {
             <span>{mins}:{secs}</span>
           </div>
           <button
-            className={`btn-icon${attention.enabled ? " active" : ""}`}
+            className={`btn-icon${attention.enabled ? " active" : ""} desktop-only`}
             title={attention.error || "Toggle camera focus tracking"}
             onClick={() => setCameraAllowed((prev) => !prev)}
           >
@@ -423,14 +424,36 @@ export default function App() {
         </div>
       </header>
 
+      <div className="mobile-ws-tabs">
+        <button
+          className={`mobile-ws-tab ${mobileTab === "problem" ? "active" : ""}`}
+          onClick={() => setMobileTab("problem")}
+        >
+          📄 Description
+        </button>
+        <button
+          className={`mobile-ws-tab ${mobileTab === "editor" ? "active" : ""}`}
+          onClick={() => setMobileTab("editor")}
+        >
+          💻 Code & Test
+        </button>
+        <button
+          className={`mobile-ws-tab ${mobileTab === "coach" ? "active" : ""}`}
+          onClick={() => setMobileTab("coach")}
+        >
+          🤖 AI Coach {messages.length > 0 && <span className="mobile-badge">{messages.length}</span>}
+        </button>
+      </div>
+
       <div
         className="ws-grid"
         style={{
           gridTemplateColumns: `${leftWidth}px 5px minmax(340px,1fr) 5px ${rightWidth}px`,
-          height: "calc(100vh - 52px)",
+          flex: 1,
+          minHeight: 0,
         }}
       >
-        <aside className="panel-problem">
+        <aside className={`panel-problem ${mobileTab !== "problem" ? "mobile-hidden" : ""}`}>
           <div className="prob-meta">
             <span className={`diff-badge diff-${problem.difficulty}`}>{problem.difficulty}</span>
             {problem.topics.slice(0, 4).map((t, i) => (
@@ -459,7 +482,7 @@ export default function App() {
             </div>
           )}
 
-          <div className="camera-section">
+          <div className="camera-section desktop-only">
             <h3>Focus Tracking</h3>
             <video
               ref={attention.videoRef}
@@ -502,10 +525,10 @@ export default function App() {
 
         <div className={`resizer resizer-col${dragging === "left" ? " dragging" : ""}`} onMouseDown={handleMouseDown("left")} />
 
-        <section className="panel-editor">
+        <section className={`panel-editor ${mobileTab !== "editor" ? "mobile-hidden" : ""}`}>
           <div className="editor-toolbar">
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span className="label" style={{ fontSize: "12px" }}>{languageLabel}</span>
+              <span className="label desktop-only" style={{ fontSize: "12px" }}>{languageLabel}</span>
               <select
                 className="form-select"
                 style={{ width: "auto", minWidth: "120px" }}
@@ -594,7 +617,7 @@ export default function App() {
 
         <div className={`resizer resizer-col${dragging === "right" ? " dragging" : ""}`} onMouseDown={handleMouseDown("right")} />
 
-        <aside className="panel-coach">
+        <aside className={`panel-coach ${mobileTab !== "coach" ? "mobile-hidden" : ""}`}>
           <div className="coach-header">
             <div className="coach-avatar">S</div>
             <div className="coach-meta">
