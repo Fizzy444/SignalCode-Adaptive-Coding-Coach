@@ -14,6 +14,7 @@ export function useAttention(onSignal: (signal: AttentionSignal) => void) {
   const [score, setScore] = useState(100);
   const scoreRef = useRef(100);
   const landmarkerRef = useRef<FaceLandmarker | null>(null);
+  const startInFlightRef = useRef(false);
   const callbackRef = useRef(onSignal);
   callbackRef.current = onSignal;
 
@@ -26,6 +27,8 @@ export function useAttention(onSignal: (signal: AttentionSignal) => void) {
   }, []);
 
   const start = useCallback(async () => {
+    if (startInFlightRef.current) return false;
+    startInFlightRef.current = true;
     setError(null);
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
@@ -48,21 +51,40 @@ export function useAttention(onSignal: (signal: AttentionSignal) => void) {
       const vision = await FilesetResolver.forVisionTasks(
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm"
       );
-      landmarkerRef.current = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath:
-            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-          delegate: "GPU",
-        },
-        runningMode: "VIDEO",
-        numFaces: 1,
-      });
+      const modelAssetPath =
+        "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+      const createLandmarker = (delegate: "GPU" | "CPU") =>
+        FaceLandmarker.createFromOptions(vision, {
+          baseOptions: { modelAssetPath, delegate },
+          runningMode: "VIDEO",
+          numFaces: 1,
+        });
+      const prefersCpu = navigator.userAgent.includes("Firefox");
+      if (prefersCpu) {
+        landmarkerRef.current = await createLandmarker("CPU");
+      } else {
+        try {
+          landmarkerRef.current = await createLandmarker("GPU");
+        } catch {
+          landmarkerRef.current = await createLandmarker("CPU");
+        }
+      }
       setEnabled(true);
       return true;
     } catch (reason) {
       stop();
-      setError(reason instanceof Error ? reason.message : "Could not start the camera.");
+      const message =
+        reason instanceof Error || reason instanceof DOMException
+          ? reason.message
+          : typeof reason === "string"
+            ? reason
+            : reason && typeof reason === "object" && "message" in reason
+              ? String(reason.message)
+              : "Could not start the camera.";
+      setError(message || "Could not start the camera.");
       return false;
+    } finally {
+      startInFlightRef.current = false;
     }
   }, [stop]);
 

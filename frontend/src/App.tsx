@@ -83,7 +83,13 @@ export default function App() {
     } else if (!cameraAllowed && attention.enabled) {
       attention.stop();
     }
-  }, [cameraAllowed, attention]);
+  }, [
+    cameraAllowed,
+    attention.enabled,
+    attention.error,
+    attention.start,
+    attention.stop,
+  ]);
 
   useEffect(() => {
     if (problem && sessionId) {
@@ -564,6 +570,8 @@ function ProblemLibrary({
     const text = `${item.title} ${item.description} ${item.topics.join(" ")}`.toLowerCase();
     return text.includes(query.toLowerCase()) && (tag === "all" || item.topics.includes(tag));
   });
+  const leetcodeProblems = visible.filter((item) => item.source.toLowerCase() === "leetcode");
+  const customProblems = visible.filter((item) => item.source.toLowerCase() !== "leetcode");
 
   async function create(form: HTMLFormElement) {
     const data = new FormData(form);
@@ -677,31 +685,67 @@ function ProblemLibrary({
         {error && <p className="form-error" style={{ marginBottom: "16px" }}>{error}</p>}
 
         <div className="prob-table">
-          {visible.map((item, n) => (
-            <div className="prob-row" key={item.id} onClick={() => onPractice(item)}>
-              <div className="prob-row-left">
-                <span className="prob-num">{String(n + 1).padStart(2, "0")}</span>
-                <div className="prob-info">
-                  <div className="prob-name">{item.title}</div>
-                  <div className="prob-tags">
-                    {item.topics.slice(0, 4).map((t, i) => (
-                      <span key={i} className="tag-chip">{t}</span>
-                    ))}
+          {!!leetcodeProblems.length && (
+            <div className="prob-section">
+              <div className="prob-section-label">LeetCode problems</div>
+              {leetcodeProblems.map((item, n) => (
+                <div className="prob-row" key={item.id} onClick={() => onPractice(item)}>
+                  <div className="prob-row-left">
+                    <span className="prob-num">{String(n + 1).padStart(2, "0")}</span>
+                    <div className="prob-info">
+                      <div className="prob-name">{item.title}</div>
+                      <div className="prob-tags">
+                        {item.topics.slice(0, 4).map((t, i) => (
+                          <span key={i} className="tag-chip">{t}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="prob-row-right">
+                    <span className={`diff-badge diff-${item.difficulty}`}>{item.difficulty}</span>
+                    <button
+                      className="btn-primary"
+                      style={{ padding: "7px 14px", fontSize: "13px" }}
+                      onClick={(e) => { e.stopPropagation(); onPractice(item); }}
+                    >
+                      Practice
+                    </button>
                   </div>
                 </div>
-              </div>
-              <div className="prob-row-right">
-                <span className={`diff-badge diff-${item.difficulty}`}>{item.difficulty}</span>
-                <button
-                  className="btn-primary"
-                  style={{ padding: "7px 14px", fontSize: "13px" }}
-                  onClick={(e) => { e.stopPropagation(); onPractice(item); }}
-                >
-                  Practice
-                </button>
-              </div>
+              ))}
             </div>
-          ))}
+          )}
+          {!!leetcodeProblems.length && !!customProblems.length && <div className="prob-divider" />}
+          {!!customProblems.length && (
+            <div className="prob-section">
+              <div className="prob-section-label">Custom problems</div>
+              {customProblems.map((item, n) => (
+                <div className="prob-row" key={item.id} onClick={() => onPractice(item)}>
+                  <div className="prob-row-left">
+                    <span className="prob-num">{String(n + 1).padStart(2, "0")}</span>
+                    <div className="prob-info">
+                      <div className="prob-name">{item.title}</div>
+                      <div className="prob-tags">
+                        {item.topics.slice(0, 4).map((t, i) => (
+                          <span key={i} className="tag-chip">{t}</span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="prob-row-right">
+                    <span className={`diff-badge diff-${item.difficulty}`}>{item.difficulty}</span>
+                    <button
+                      className="btn-primary"
+                      style={{ padding: "7px 14px", fontSize: "13px" }}
+                      onClick={(e) => { e.stopPropagation(); onPractice(item); }}
+                    >
+                      Practice
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           {!visible.length && <div className="empty-state">No problems match your search.</div>}
         </div>
       </div>

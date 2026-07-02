@@ -2,7 +2,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-Language = Literal["python", "javascript"]
+Language = Literal["python", "javascript", "java"]
 
 
 class Problem(BaseModel):
@@ -28,7 +28,7 @@ class ProblemCreate(BaseModel):
     examples: list[dict[str, str]] = Field(default_factory=list, max_length=10)
     test_cases: list[dict[str, str]] = Field(default_factory=list, max_length=20)
     starter_code: dict[Language, str] = Field(
-        default_factory=lambda: {"python": "", "javascript": ""}
+        default_factory=lambda: {"python": "", "javascript": "", "java": ""}
     )
 
 

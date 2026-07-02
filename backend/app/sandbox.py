@@ -61,6 +61,29 @@ def _validate_javascript(code: str) -> str | None:
     return None
 
 
+def _validate_java(code: str) -> str | None:
+    compact = re.sub(r"\s+", "", code).lower()
+    blocked = [
+        "java.io.", "java.nio.", "java.net.", "java.lang.reflect.",
+        "java.lang.runtime", "runtime.getruntime(", "java.lang.process", "processbuilder",
+        "system.exit(", "system.load(", "system.loadlibrary(",
+    ]
+    if any(token in compact for token in blocked):
+        return "SandboxError: filesystem, process, network, and reflection APIs are disabled."
+    return None
+
+
+def _java_main_class(code: str) -> str | None:
+    public_class = re.search(
+        r"\bpublic\s+(?:final\s+|abstract\s+)?class\s+([A-Za-z_$][\w$]*)",
+        code,
+    )
+    if public_class:
+        return public_class.group(1)
+    any_class = re.search(r"\bclass\s+([A-Za-z_$][\w$]*)", code)
+    return any_class.group(1) if any_class else None
+
+
 def _generate_python_harness(test_cases: list[dict[str, str]]) -> str:
     tc_json = json.dumps(test_cases)
     return f"""
@@ -264,14 +287,31 @@ console.log(JSON.stringify(_signalcode_results));
 
 
 def run_code(language: str, code: str, problem_id: str | None = None, test_cases: list[dict[str, str]] | None = None) -> CodeRunResult:
-    validation_error = (
-        _validate_python(code) if language == "python" else _validate_javascript(code)
-    )
+    validators = {
+        "python": _validate_python,
+        "javascript": _validate_javascript,
+        "java": _validate_java,
+    }
+    validator = validators.get(language)
+    if validator is None:
+        return CodeRunResult(
+            output=f"RuntimeError: unsupported language '{language}'.",
+            exit_code=1,
+            passed=False,
+        )
+    validation_error = validator(code)
     if validation_error:
         return CodeRunResult(output=validation_error, exit_code=1, passed=False)
 
-    suffix = ".py" if language == "python" else ".js"
-    executable = "python" if language == "python" else "node"
+    if language == "java" and test_cases:
+        return CodeRunResult(
+            output="SandboxError: Java test-case harnesses are not supported yet; run a complete program with main().",
+            exit_code=1,
+            passed=False,
+        )
+
+    suffix = {"python": ".py", "javascript": ".js", "java": ".java"}[language]
+    executable = {"python": "python", "javascript": "node", "java": "java"}[language]
     args = [executable]
     if language == "python":
         args.extend(["-I", "-B"])
@@ -284,9 +324,19 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
             run_source_code += _generate_javascript_harness(code, test_cases)
 
     with tempfile.TemporaryDirectory(prefix="signalcode-run-") as directory:
-        source = Path(directory) / f"main{suffix}"
+        java_class = _java_main_class(code) if language == "java" else None
+        if language == "java" and not java_class:
+            return CodeRunResult(
+                output="CompileError: Java code must declare a class containing main().",
+                exit_code=1,
+                passed=False,
+            )
+        source = Path(directory) / f"{java_class or 'main'}{suffix}"
         source.write_text(run_source_code, encoding="utf-8")
-        args.append(str(source))
+        if language == "java":
+            args.extend(["-cp", directory, java_class])
+        else:
+            args.append(str(source))
         environment = {
             "PATH": os.environ.get("PATH", ""),
             "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
@@ -298,6 +348,29 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
             "NO_COLOR": "1",
         }
         try:
+            if language == "java":
+                compiled = subprocess.run(
+                    ["javac", "-encoding", "UTF-8", "-d", directory, str(source)],
+                    cwd=directory,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=TIMEOUT_SECONDS,
+                    check=False,
+                    creationflags=(
+                        subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                    ),
+                )
+                if compiled.returncode != 0:
+                    compile_output = compiled.stdout[:MAX_OUTPUT_BYTES].decode(
+                        "utf-8", errors="replace"
+                    )
+                    return CodeRunResult(
+                        output=compile_output.rstrip(),
+                        exit_code=compiled.returncode,
+                        passed=False,
+                    )
             completed = subprocess.run(
                 args,
                 cwd=directory,
@@ -318,8 +391,9 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
             message = f"{partial}\nExecution timed out after {TIMEOUT_SECONDS}s.".strip()
             return CodeRunResult(output=message, timed_out=True, passed=False)
         except FileNotFoundError:
+            missing_runtime = "javac/JDK" if language == "java" else executable
             return CodeRunResult(
-                output=f"RuntimeError: {executable} is not installed on the server.",
+                output=f"RuntimeError: {missing_runtime} is not installed on the server.",
                 exit_code=127,
                 passed=False,
             )
@@ -355,4 +429,3 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
         passed=passed,
         test_results=test_results,
     )
-

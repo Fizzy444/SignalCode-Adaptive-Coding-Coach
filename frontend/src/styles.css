@@ -173,6 +173,26 @@ h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacin
   color: var(--text);
   display: block;
   margin-bottom: 4px;
+
+.prob-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.prob-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+  padding: 4px 0 10px;
+}
+
+.prob-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 14px 0;
+}
 }
 .stat-label { font-size: 13px; color: var(--text-2); }
 
@@ -658,6 +678,9 @@ h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacin
   border-radius: var(--radius);
   cursor: pointer;
   transition: border-color 0.18s, background 0.18s;
+}
+.prob-section .prob-row + .prob-row {
+  margin-top: 5px;
 }
 .prob-row:hover { border-color: var(--border-2); background: var(--bg-3); }
 .prob-row-left { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }

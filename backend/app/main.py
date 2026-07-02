@@ -94,6 +94,9 @@ async def import_problem(request: ProblemImportRequest):
         slug = slug.split("/")[-1] or slug.split("/")[-2]
     else:
         slug = re.sub(r"[\s_]+", "-", slug).strip("-")
+    # LeetCode links copied from numbered lists are often formatted like
+    # "10.regular-expression-matching"; the API expects only the title slug.
+    slug = re.sub(r"^\d+[\s._-]+", "", slug)
 
     existing = get_problem(slug) or get_problem(f"custom-{slug}")
     if existing:

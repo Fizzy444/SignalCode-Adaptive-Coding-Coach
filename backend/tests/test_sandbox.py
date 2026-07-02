@@ -13,6 +13,39 @@ def test_javascript_execution():
     assert result.output == "10"
 
 
+def test_java_execution():
+    result = run_code(
+        "java",
+        """
+public class Main {
+    public static void main(String[] args) {
+        System.out.println(2 + 3 + 5);
+    }
+}
+""",
+    )
+    assert result.exit_code == 0
+    assert result.output == "10"
+
+
+def test_java_compile_error():
+    result = run_code(
+        "java",
+        "public class Main { public static void main(String[] args) { nope } }",
+    )
+    assert result.exit_code != 0
+    assert result.passed is False
+
+
+def test_java_blocks_process_access():
+    result = run_code(
+        "java",
+        'class Main { public static void main(String[] a) throws Exception { Runtime.getRuntime().exec("cmd"); } }',
+    )
+    assert result.exit_code == 1
+    assert result.output.startswith("SandboxError:")
+
+
 def test_python_blocks_process_access():
     result = run_code("python", "import subprocess")
     assert result.exit_code == 1
@@ -62,4 +95,3 @@ function twoSum(nums, target) {
     assert result.test_results is not None
     assert len(result.test_results) == 2
     assert all(tc.passed for tc in result.test_results)
-

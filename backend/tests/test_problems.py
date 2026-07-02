@@ -84,7 +84,10 @@ def test_leetcode_import(tmp_path: Path):
 
 
             with TestClient(app) as client:
-                res = client.post("/api/problems/import", json={"slug": "three-sum-closest"})
+                res = client.post(
+                    "/api/problems/import",
+                    json={"slug": "10.three-sum-closest"},
+                )
                 assert res.status_code == 201
                 data = res.json()
                 assert data["title"] == "Three Sum Closest"
@@ -93,7 +96,8 @@ def test_leetcode_import(tmp_path: Path):
                 assert data["starter_code"]["python"] == "def threeSumClosest(nums, target):\n    pass\n"
                 assert len(data["examples"]) == 1
                 assert data["examples"][0]["output"] == "2"
+                graphql_request = mock_post.call_args_list[0]
+                assert graphql_request.kwargs["json"]["variables"]["titleSlug"] == "three-sum-closest"
 
     finally:
         settings.database_path = original_path
-
