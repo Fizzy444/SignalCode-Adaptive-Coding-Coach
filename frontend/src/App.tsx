@@ -36,6 +36,24 @@ export default function App() {
   const [rightWidth, setRightWidth] = useState(() => Number(localStorage.getItem("sc_right_width")) || 320);
   const [bottomHeight, setBottomHeight] = useState(() => Number(localStorage.getItem("sc_bottom_height")) || 240);
   const [dragging, setDragging] = useState<"left" | "right" | "bottom" | null>(null);
+  const [completedProblems, setCompletedProblems] = useState<string[]>(() => {
+    try {
+      const item = localStorage.getItem("sc_completed_problems");
+      return item ? JSON.parse(item) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  function markCompleted(id: string) {
+    setCompletedProblems((prev) => {
+      if (prev.includes(id)) return prev;
+      const next = [...prev, id];
+      localStorage.setItem("sc_completed_problems", JSON.stringify(next));
+      return next;
+    });
+  }
+
   const socket = useRef<WebSocket | null>(null);
   const coachMessagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -129,7 +147,18 @@ export default function App() {
       const ws = connectCoach(sessionId);
       ws.onmessage = (event) => {
         const incoming: CoachMessage = JSON.parse(event.data);
-        if (incoming.type === "report" && incoming.payload) setReport(incoming.payload);
+        if (incoming.type === "report" && incoming.payload) {
+          setReport(incoming.payload);
+          if (incoming.payload.successful_runs > 0) {
+            setCompletedProblems((prev) => {
+              const currentProblemId = savedSession?.problem?.id || problem?.id;
+              if (!currentProblemId || prev.includes(currentProblemId)) return prev;
+              const next = [...prev, currentProblemId];
+              localStorage.setItem("sc_completed_problems", JSON.stringify(next));
+              return next;
+            });
+          }
+        }
         else setMessages((current) => [...current, incoming]);
       };
       socket.current = ws;
@@ -176,7 +205,17 @@ export default function App() {
     const ws = connectCoach(created.session_id);
     ws.onmessage = (event) => {
       const incoming: CoachMessage = JSON.parse(event.data);
-      if (incoming.type === "report" && incoming.payload) setReport(incoming.payload);
+      if (incoming.type === "report" && incoming.payload) {
+        setReport(incoming.payload);
+        if (incoming.payload.successful_runs > 0) {
+          setCompletedProblems((prev) => {
+            if (prev.includes(created.problem.id)) return prev;
+            const next = [...prev, created.problem.id];
+            localStorage.setItem("sc_completed_problems", JSON.stringify(next));
+            return next;
+          });
+        }
+      }
       else setMessages((current) => [...current, incoming]);
     };
     socket.current = ws;
@@ -214,6 +253,36 @@ export default function App() {
     setRunResult(result);
     const passed = result.passed ?? !(/error|disabled/i.test(result.output) || result.exit_code !== 0);
     send({ type: "run_result", code, language, passed, output: result.output });
+    if (passed && problem) {
+      markCompleted(problem.id);
+    }
+  }
+
+  async function submitSolution() {
+    if (problem && code.trim() === problem.starter_code[language].trim()) {
+      setOutput("Write some solution code before submitting.");
+      setRunResult({ output: "Write some solution code before submitting.", passed: false });
+      return;
+    }
+    setOutput("Submitting code and validating all test cases...");
+    setRunResult({ output: "Submitting code and validating all test cases...", passed: null });
+    const result = await runCode(language, code, problem?.id, problem?.test_cases || problem?.examples);
+    setOutput(result.output);
+    setRunResult(result);
+    const passed = result.passed ?? !(/error|disabled/i.test(result.output) || result.exit_code !== 0);
+    send({ type: "run_result", code, language, passed, output: result.output });
+    if (passed && problem) {
+      markCompleted(problem.id);
+      setMessages((current) => [
+        ...current,
+        { type: "coach", level: "celebrate", message: "🎉 Solution submitted and accepted! Problem marked as solved in your library." }
+      ]);
+    } else {
+      setMessages((current) => [
+        ...current,
+        { type: "coach", level: "nudge", message: "Submission failed some test cases. Check the test results and try again!" }
+      ]);
+    }
   }
 
   function handleSendMessage(e: React.FormEvent) {
@@ -238,6 +307,7 @@ export default function App() {
             onLanguage={setLanguage}
             onBack={() => setView("home")}
             onPractice={begin}
+            completedProblems={completedProblems}
           />
         </>
       );
@@ -383,7 +453,12 @@ export default function App() {
               <span key={i} className="tag-chip">{t}</span>
             ))}
           </div>
-          <h2 className="prob-title">{problem.title}</h2>
+          <h2 className="prob-title">
+            {problem.title}
+            {completedProblems.includes(problem.id) && (
+              <span className="completed-badge" title="Completed">✓ Solved</span>
+            )}
+          </h2>
           <div className="prob-desc">{problem.description}</div>
 
           {(!problem.description.toLowerCase().includes("example 1:") &&
@@ -458,7 +533,10 @@ export default function App() {
                 <option value="java">Java</option>
               </select>
             </div>
-            <button className="run-btn" onClick={execute}>▶ Run Code</button>
+            <div style={{ display: "flex", gap: "8px" }}>
+              <button className="run-btn" onClick={execute}>▶ Run Code</button>
+              <button className="submit-btn" onClick={submitSolution}>✓ Submit</button>
+            </div>
           </div>
           <div style={{ flex: 1, position: "relative", minHeight: 0, overflow: "hidden" }}>
             <Editor
@@ -608,15 +686,18 @@ function ProblemLibrary({
   onLanguage,
   onBack,
   onPractice,
+  completedProblems,
 }: {
   language: Language;
   onLanguage: (language: Language) => void;
   onBack: () => void;
   onPractice: (problem: Problem) => void;
+  completedProblems: string[];
 }) {
   const [problems, setProblems] = useState<Problem[]>([]);
   const [query, setQuery] = useState("");
   const [tag, setTag] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importSlug, setImportSlug] = useState("");
@@ -630,7 +711,14 @@ function ProblemLibrary({
   const tags = [...new Set(problems.flatMap((item) => item.topics))].sort();
   const visible = problems.filter((item) => {
     const text = `${item.title} ${item.description} ${item.topics.join(" ")}`.toLowerCase();
-    return text.includes(query.toLowerCase()) && (tag === "all" || item.topics.includes(tag));
+    const matchesQuery = text.includes(query.toLowerCase());
+    const matchesTag = tag === "all" || item.topics.includes(tag);
+    const isSolved = completedProblems.includes(item.id);
+    const matchesStatus =
+      statusFilter === "all" ||
+      (statusFilter === "solved" && isSolved) ||
+      (statusFilter === "unsolved" && !isSolved);
+    return matchesQuery && matchesTag && matchesStatus;
   });
   const leetcodeProblems = visible.filter((item) => item.source.toLowerCase() === "leetcode");
   const customProblems = visible.filter((item) => item.source.toLowerCase() !== "leetcode");
@@ -744,6 +832,16 @@ function ProblemLibrary({
             <option value="all">All topics</option>
             {tags.map((item) => <option key={item}>{item}</option>)}
           </select>
+          <select
+            className="form-select"
+            style={{ width: "auto", minWidth: "140px" }}
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+          >
+            <option value="all">All statuses</option>
+            <option value="solved">Solved ✓</option>
+            <option value="unsolved">Unsolved</option>
+          </select>
         </div>
 
         {error && <p className="form-error" style={{ marginBottom: "16px" }}>{error}</p>}
@@ -757,7 +855,12 @@ function ProblemLibrary({
                   <div className="prob-row-left">
                     <span className="prob-num">{String(n + 1).padStart(2, "0")}</span>
                     <div className="prob-info">
-                      <div className="prob-name">{item.title}</div>
+                      <div className="prob-name">
+                        {item.title}
+                        {completedProblems.includes(item.id) && (
+                          <span className="completed-badge" title="Completed">✓ Solved</span>
+                        )}
+                      </div>
                       <div className="prob-tags">
                         {item.topics.slice(0, 4).map((t, i) => (
                           <span key={i} className="tag-chip">{t}</span>
@@ -788,7 +891,12 @@ function ProblemLibrary({
                   <div className="prob-row-left">
                     <span className="prob-num">{String(n + 1).padStart(2, "0")}</span>
                     <div className="prob-info">
-                      <div className="prob-name">{item.title}</div>
+                      <div className="prob-name">
+                        {item.title}
+                        {completedProblems.includes(item.id) && (
+                          <span className="completed-badge" title="Completed">✓ Solved</span>
+                        )}
+                      </div>
                       <div className="prob-tags">
                         {item.topics.slice(0, 4).map((t, i) => (
                           <span key={i} className="tag-chip">{t}</span>
