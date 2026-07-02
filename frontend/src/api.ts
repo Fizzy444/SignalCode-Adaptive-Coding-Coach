@@ -1,7 +1,8 @@
 import type { Language, Problem } from "./types";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8000";
+const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
+const API_URL = import.meta.env.VITE_API_URL || `http://${host}:8000`;
+const WS_URL = import.meta.env.VITE_WS_URL || `ws://${host}:8000`;
 
 export async function createSession(language: Language, problemId?: string): Promise<{
   session_id: string;

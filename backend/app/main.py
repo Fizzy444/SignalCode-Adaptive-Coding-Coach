@@ -28,7 +28,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="SignalCode API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[get_settings().frontend_origin],
+    allow_origins=[get_settings().frontend_origin, "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex="http://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

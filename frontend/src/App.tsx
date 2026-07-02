@@ -253,36 +253,20 @@ export default function App() {
     setRunResult(result);
     const passed = result.passed ?? !(/error|disabled/i.test(result.output) || result.exit_code !== 0);
     send({ type: "run_result", code, language, passed, output: result.output });
-    if (passed && problem) {
-      markCompleted(problem.id);
-    }
   }
 
-  async function submitSolution() {
-    if (problem && code.trim() === problem.starter_code[language].trim()) {
-      setOutput("Write some solution code before submitting.");
-      setRunResult({ output: "Write some solution code before submitting.", passed: false });
-      return;
-    }
-    setOutput("Submitting code and validating all test cases...");
-    setRunResult({ output: "Submitting code and validating all test cases...", passed: null });
-    const result = await runCode(language, code, problem?.id, problem?.test_cases || problem?.examples);
-    setOutput(result.output);
-    setRunResult(result);
-    const passed = result.passed ?? !(/error|disabled/i.test(result.output) || result.exit_code !== 0);
-    send({ type: "run_result", code, language, passed, output: result.output });
-    if (passed && problem) {
-      markCompleted(problem.id);
-      setMessages((current) => [
+  function submitSolution() {
+    if (!problem || !runResult?.passed) return;
+    markCompleted(problem.id);
+    setMessages((current) => {
+      if (current.some((m) => m.message.includes("marked as solved"))) {
+        return current;
+      }
+      return [
         ...current,
         { type: "coach", level: "celebrate", message: "🎉 Solution submitted and accepted! Problem marked as solved in your library." }
-      ]);
-    } else {
-      setMessages((current) => [
-        ...current,
-        { type: "coach", level: "nudge", message: "Submission failed some test cases. Check the test results and try again!" }
-      ]);
-    }
+      ];
+    });
   }
 
   function handleSendMessage(e: React.FormEvent) {
@@ -535,7 +519,9 @@ export default function App() {
             </div>
             <div style={{ display: "flex", gap: "8px" }}>
               <button className="run-btn" onClick={execute}>▶ Run Code</button>
-              <button className="submit-btn" onClick={submitSolution}>✓ Submit</button>
+              {runResult?.passed && (
+                <button className="submit-btn" onClick={submitSolution}>✓ Submit</button>
+              )}
             </div>
           </div>
           <div style={{ flex: 1, position: "relative", minHeight: 0, overflow: "hidden" }}>
@@ -548,6 +534,7 @@ export default function App() {
                 const nextCode = value || "";
                 setCode(nextCode);
                 setDrafts((current) => ({ ...current, [language]: nextCode }));
+                if (runResult) setRunResult(null);
               }}
               options={{ fontSize: 14, minimap: { enabled: false }, padding: { top: 16 }, automaticLayout: true, lineNumbersMinChars: 3, scrollBeyondLastLine: false }}
             />
@@ -783,9 +770,10 @@ function ProblemLibrary({
             SignalCode
           </div>
         </button>
-        <div style={{ display: "flex", gap: "8px" }}>
+        <div className="lib-header-actions">
           <button className="btn-ghost" onClick={() => { setImporting(true); setCreating(false); setError(""); }}>
-            ↓ Import from LeetCode
+            <span className="import-long">↓ Import from LeetCode</span>
+            <span className="import-short">↓ Import</span>
           </button>
           <button className="btn-primary" onClick={() => { setCreating(true); setImporting(false); setError(""); }}>
             + Add problem
