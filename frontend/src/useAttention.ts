@@ -18,8 +18,10 @@ export function useAttention(onSignal: (signal: AttentionSignal) => void) {
   callbackRef.current = onSignal;
 
   const stop = useCallback(() => {
-    videoRef.current?.srcObject &&
+    if (videoRef.current?.srcObject) {
       (videoRef.current.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
+      videoRef.current.srcObject = null;
+    }
     setEnabled(false);
   }, []);
 
@@ -33,6 +35,10 @@ export function useAttention(onSignal: (signal: AttentionSignal) => void) {
         video: { width: 320, height: 240, facingMode: "user" },
         audio: false,
       });
+      for (let i = 0; i < 20; i++) {
+        if (videoRef.current) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
       if (!videoRef.current) {
         stream.getTracks().forEach((track) => track.stop());
         throw new Error("Camera preview is not ready.");

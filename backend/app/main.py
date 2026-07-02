@@ -92,19 +92,63 @@ async def import_problem(request: ProblemImportRequest):
         slug = parts[0] if parts else slug
     elif "http" in slug and "/" in slug:
         slug = slug.split("/")[-1] or slug.split("/")[-2]
+    else:
+        slug = re.sub(r"[\s_]+", "-", slug).strip("-")
 
     existing = get_problem(slug) or get_problem(f"custom-{slug}")
     if existing:
         return existing
 
-    url = "https://alfa-leetcode-api.onrender.com/daily" if slug in ("daily", "daily-question", "today") else f"https://alfa-leetcode-api.onrender.com/select?titleSlug={slug}"
+    data = None
+    starter_code = {"python": "# Write your solution here\n", "javascript": "// Write your solution here\n"}
+    is_daily = slug in ("daily", "daily-question", "today")
+
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            res = await client.get(url)
-            res.raise_for_status()
-            data = res.json()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch from LeetCode API: {str(e)}")
+        if is_daily:
+            gql_query = {
+                "query": "query activeDailyCodingChallengeQuestion { activeDailyCodingChallengeQuestion { question { questionId title titleSlug difficulty content topicTags { name } codeSnippets { langSlug code } } } }"
+            }
+        else:
+            gql_query = {
+                "query": "query questionData($titleSlug: String!) { question(titleSlug: $titleSlug) { questionId title titleSlug difficulty content topicTags { name } codeSnippets { langSlug code } } }",
+                "variables": {"titleSlug": slug}
+            }
+        async with httpx.AsyncClient(timeout=10) as client:
+            gql_res = await client.post("https://leetcode.com/graphql", json=gql_query, headers={"User-Agent": "Mozilla/5.0"})
+            if gql_res.status_code == 200:
+                res_json = gql_res.json()
+                q_data = res_json.get("data", {}).get("activeDailyCodingChallengeQuestion", {}).get("question") if is_daily else res_json.get("data", {}).get("question")
+                if q_data and q_data.get("title"):
+                    data = {
+                        "questionTitle": q_data.get("title"),
+                        "titleSlug": q_data.get("titleSlug", "daily" if is_daily else slug),
+                        "difficulty": q_data.get("difficulty", "Easy"),
+                        "topicTags": q_data.get("topicTags", []),
+                        "question": q_data.get("content", "")
+                    }
+                    for s in q_data.get("codeSnippets", []):
+                        if s.get("langSlug") in ("python3", "python") and s.get("code"):
+                            starter_code["python"] = s["code"]
+                        elif s.get("langSlug") == "javascript" and s.get("code"):
+                            starter_code["javascript"] = s["code"]
+    except Exception:
+        pass
+
+    if not data or "questionTitle" not in data:
+        url = "https://alfa-leetcode-api.onrender.com/daily" if is_daily else f"https://alfa-leetcode-api.onrender.com/select?titleSlug={slug}"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    data = res.json()
+                elif is_daily:
+                    return select_problem("easy")
+                else:
+                    res.raise_for_status()
+        except Exception as e:
+            if is_daily:
+                return select_problem("easy")
+            raise HTTPException(status_code=502, detail=f"Failed to fetch from LeetCode API: {str(e)}. Problem '{slug}' not found on LeetCode API.")
 
     if not data or "questionTitle" not in data:
         raise HTTPException(status_code=404, detail=f"Problem '{slug}' not found on LeetCode API.")
@@ -118,7 +162,15 @@ async def import_problem(request: ProblemImportRequest):
         topics = ["algorithms"]
 
     raw_question = str(data.get("question", ""))
-    clean_text = html.unescape(re.sub(r"<[^>]+>", "", raw_question)).strip()
+    formatted = re.sub(r"<br\s*/?>", "\n", raw_question, flags=re.IGNORECASE)
+    formatted = re.sub(r"</(p|pre|ul|ol|div|h\d)>", "\n\n", formatted, flags=re.IGNORECASE)
+    formatted = re.sub(r"<li>", "\n  • ", formatted, flags=re.IGNORECASE)
+    formatted = re.sub(r"</li>", "", formatted, flags=re.IGNORECASE)
+    formatted = re.sub(r"</?code>", "`", formatted, flags=re.IGNORECASE)
+    formatted = re.sub(r"</?strong>", "**", formatted, flags=re.IGNORECASE)
+    formatted = re.sub(r"</?em>", "*", formatted, flags=re.IGNORECASE)
+    clean_text = html.unescape(re.sub(r"<[^>]+>", "", formatted)).strip()
+    clean_text = re.sub(r"\n{3,}", "\n\n", clean_text)
     description = clean_text or title
 
     examples_found = re.findall(r"Input:\s*([^\n]+)\s*Output:\s*([^\n]+)", clean_text, re.IGNORECASE)
@@ -126,23 +178,23 @@ async def import_problem(request: ProblemImportRequest):
     if not examples:
         examples = [{"input": "See description", "output": "See description"}]
 
-    starter_code = {"python": "# Write your solution here\n", "javascript": "// Write your solution here\n"}
-    try:
-        query = {
-            "query": "query questionData($titleSlug: String!) { question(titleSlug: $titleSlug) { codeSnippets { langSlug code } } }".replace("$", ""),
-            "variables": {"titleSlug": data.get("titleSlug", slug)}
-        }
-        async with httpx.AsyncClient(timeout=10) as client:
-            gql_res = await client.post("https://leetcode.com/graphql", json=query, headers={"User-Agent": "Mozilla/5.0"})
-            if gql_res.status_code == 200:
-                snippets = gql_res.json().get("data", {}).get("question", {}).get("codeSnippets", [])
-                for s in snippets:
-                    if s.get("langSlug") in ("python3", "python") and s.get("code"):
-                        starter_code["python"] = s["code"]
-                    elif s.get("langSlug") == "javascript" and s.get("code"):
-                        starter_code["javascript"] = s["code"]
-    except Exception:
-        pass
+    if starter_code["python"] == "# Write your solution here\n":
+        try:
+            query = {
+                "query": "query questionData($titleSlug: String!) { question(titleSlug: $titleSlug) { codeSnippets { langSlug code } } }".replace("$", ""),
+                "variables": {"titleSlug": data.get("titleSlug", slug)}
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                gql_res = await client.post("https://leetcode.com/graphql", json=query, headers={"User-Agent": "Mozilla/5.0"})
+                if gql_res.status_code == 200:
+                    snippets = gql_res.json().get("data", {}).get("question", {}).get("codeSnippets", [])
+                    for s in snippets:
+                        if s.get("langSlug") in ("python3", "python") and s.get("code"):
+                            starter_code["python"] = s["code"]
+                        elif s.get("langSlug") == "javascript" and s.get("code"):
+                            starter_code["javascript"] = s["code"]
+        except Exception:
+            pass
 
     problem = Problem(
         id=f"custom-{slug}-{str(uuid4())[:8]}",

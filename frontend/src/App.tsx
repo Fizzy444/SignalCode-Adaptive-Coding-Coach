@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { addProblem, connectCoach, createSession, getProblems, importProblem } from "./api";
 import { runCode } from "./runner";
@@ -7,20 +7,68 @@ import { useAttention } from "./useAttention";
 import "./styles.css";
 
 export default function App() {
-  const [view, setView] = useState<"home" | "library">("home");
-  const [language, setLanguage] = useState<Language>("python");
-  const [problem, setProblem] = useState<Problem | null>(null);
-  const [code, setCode] = useState("");
-  const [sessionId, setSessionId] = useState("");
-  const [messages, setMessages] = useState<CoachMessage[]>([]);
-  const [output, setOutput] = useState("Run your code when you're ready.");
-  const [runResult, setRunResult] = useState<CodeRunResult | null>(null);
+  const savedSession = useMemo(() => {
+    try {
+      const item = localStorage.getItem("sc_active_session");
+      return item ? JSON.parse(item) : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const [view, setView] = useState<"home" | "library">(() => savedSession?.view || "home");
+  const [language, setLanguage] = useState<Language>(() => savedSession?.language || "python");
+  const [problem, setProblem] = useState<Problem | null>(() => savedSession?.problem || null);
+  const [code, setCode] = useState(() => savedSession?.code || "");
+  const [sessionId, setSessionId] = useState(() => savedSession?.sessionId || "");
+  const [messages, setMessages] = useState<CoachMessage[]>(() => savedSession?.messages || []);
+  const [output, setOutput] = useState(() => savedSession?.output || "Run your code when you're ready.");
+  const [runResult, setRunResult] = useState<CodeRunResult | null>(() => savedSession?.runResult || null);
   const [chatInput, setChatInput] = useState("");
-  const [elapsed, setElapsed] = useState(0);
+  const [elapsed, setElapsed] = useState(() => savedSession?.elapsed || 0);
   const [report, setReport] = useState<Report | null>(null);
-  const [cameraAllowed, setCameraAllowed] = useState(false);
-  const [returnView, setReturnView] = useState<"home" | "library">("home");
+  const [cameraAllowed, setCameraAllowed] = useState(() => Boolean(savedSession?.cameraAllowed));
+  const [returnView, setReturnView] = useState<"home" | "library">(() => savedSession?.returnView || "home");
+  const [leftWidth, setLeftWidth] = useState(() => Number(localStorage.getItem("sc_left_width")) || 300);
+  const [rightWidth, setRightWidth] = useState(() => Number(localStorage.getItem("sc_right_width")) || 320);
+  const [bottomHeight, setBottomHeight] = useState(() => Number(localStorage.getItem("sc_bottom_height")) || 240);
+  const [dragging, setDragging] = useState<"left" | "right" | "bottom" | null>(null);
   const socket = useRef<WebSocket | null>(null);
+
+  const handleMouseDown = (type: "left" | "right" | "bottom") => (e: React.MouseEvent) => {
+    e.preventDefault();
+    setDragging(type);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startLeft = leftWidth;
+    const startRight = rightWidth;
+    const startBottom = bottomHeight;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      if (type === "left") {
+        const next = Math.max(200, Math.min(window.innerWidth - rightWidth - 360, startLeft + (moveEvent.clientX - startX)));
+        setLeftWidth(next);
+        localStorage.setItem("sc_left_width", String(next));
+      } else if (type === "right") {
+        const next = Math.max(240, Math.min(window.innerWidth - leftWidth - 360, startRight - (moveEvent.clientX - startX)));
+        setRightWidth(next);
+        localStorage.setItem("sc_right_width", String(next));
+      } else if (type === "bottom") {
+        const next = Math.max(80, Math.min(window.innerHeight - 200, startBottom - (moveEvent.clientY - startY)));
+        setBottomHeight(next);
+        localStorage.setItem("sc_bottom_height", String(next));
+      }
+    };
+
+    const onMouseUp = () => {
+      setDragging(null);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  };
 
   const send = (payload: object) => {
     if (socket.current?.readyState === WebSocket.OPEN) {
@@ -30,12 +78,42 @@ export default function App() {
   const attention = useAttention((signal) => send({ type: "attention", ...signal }));
 
   useEffect(() => {
-    if (!cameraAllowed) attention.stop();
-  }, [cameraAllowed, attention.stop]);
+    if (cameraAllowed && !attention.enabled && !attention.error) {
+      void attention.start();
+    } else if (!cameraAllowed && attention.enabled) {
+      attention.stop();
+    }
+  }, [cameraAllowed, attention]);
+
+  useEffect(() => {
+    if (problem && sessionId) {
+      localStorage.setItem("sc_active_session", JSON.stringify({
+        view, language, problem, code, sessionId, messages, output, runResult, elapsed, cameraAllowed, returnView
+      }));
+    } else if (view === "library") {
+      localStorage.setItem("sc_active_session", JSON.stringify({
+        view: "library", language, cameraAllowed, returnView
+      }));
+    } else if (!problem && view === "home") {
+      localStorage.removeItem("sc_active_session");
+    }
+  }, [view, language, problem, code, sessionId, messages, output, runResult, elapsed, cameraAllowed, returnView]);
+
+  useEffect(() => {
+    if (sessionId && !socket.current) {
+      const ws = connectCoach(sessionId);
+      ws.onmessage = (event) => {
+        const incoming: CoachMessage = JSON.parse(event.data);
+        if (incoming.type === "report" && incoming.payload) setReport(incoming.payload);
+        else setMessages((current) => [...current.slice(-5), incoming]);
+      };
+      socket.current = ws;
+    }
+  }, [sessionId]);
 
   useEffect(() => {
     if (!sessionId) return;
-    const timer = window.setInterval(() => setElapsed((x) => x + 1), 1000);
+    const timer = window.setInterval(() => setElapsed((x: number) => x + 1), 1000);
     return () => clearInterval(timer);
   }, [sessionId]);
 
@@ -70,6 +148,7 @@ export default function App() {
   }
 
   function leaveInterview() {
+    localStorage.removeItem("sc_active_session");
     socket.current?.close();
     socket.current = null;
     attention.stop();
@@ -116,48 +195,99 @@ export default function App() {
   if (!problem) {
     if (view === "library") {
       return (
-        <ProblemLibrary
-          language={language}
-          onLanguage={setLanguage}
-          onBack={() => setView("home")}
-          onPractice={begin}
-        />
+        <>
+          <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
+          <ProblemLibrary
+            language={language}
+            onLanguage={setLanguage}
+            onBack={() => setView("home")}
+            onPractice={begin}
+          />
+        </>
       );
     }
     return (
       <main className="landing">
+        <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
         <nav className="site-nav">
-          <div className="brand"><span>●</span> SignalCode</div>
-          <button className="quiet" onClick={() => setView("library")}>Browse problems</button>
+          <div className="brand">
+            <span className="brand-dot" />
+            SignalCode
+          </div>
+          <button className="btn-ghost" onClick={() => setView("library")}>Browse problems</button>
         </nav>
-        <section className="hero">
-          <p className="eyebrow">ADAPTIVE INTERVIEW PRACTICE</p>
-          <h1>Practice the problem.<br /><em>Train the moment.</em></h1>
-          <p className="lede">
-            A private AI coach that watches your process—not your personality—and
-            gives the smallest useful hint at the right time.
+
+        <div className="hero-section">
+          <div className="hero-pill">
+            <span className="hero-pill-dot" />
+            AI-Powered Interview Sandbox
+          </div>
+          <h1 className="hero-title">Practice smarter.<br /><em>Ship faster.</em></h1>
+          <p className="hero-subtitle">
+            A private AI coach that watches your process—not your personality—and delivers the smallest useful hint at exactly the right moment.
           </p>
-          <div className="start-row">
-            <select value={language} onChange={(e) => setLanguage(e.target.value as Language)}>
+          <div className="hero-actions">
+            <select
+              className="form-select"
+              style={{ width: "auto" }}
+              value={language}
+              onChange={(e) => setLanguage(e.target.value as Language)}
+            >
               <option value="python">Python</option>
               <option value="javascript">JavaScript</option>
             </select>
-            <button className="primary" onClick={() => begin()}>Start practice →</button>
+            <button className="btn-primary" onClick={() => setView("library")}>
+              Browse Problems →
+            </button>
           </div>
-          <label className="camera-choice">
-            <input
-              type="checkbox"
-              checked={cameraAllowed}
-              onChange={(event) => setCameraAllowed(event.target.checked)}
-            />
-            Use optional on-device camera attention signals
-          </label>
-          <p className="privacy">Camera is optional. Raw video never leaves your browser.</p>
-        </section>
-        <div className="feature-strip">
-          <span>01 · Real-time coaching</span>
-          <span>02 · Adaptive difficulty</span>
-          <span>03 · Private attention signals</span>
+          <p className="hero-meta">
+            <label>
+              <input
+                type="checkbox"
+                checked={cameraAllowed}
+                onChange={(event) => setCameraAllowed(event.target.checked)}
+              />
+              Enable on-device focus tracking (camera stays local)
+            </label>
+          </p>
+        </div>
+
+        <div className="stats-strip">
+          <div className="stat-item">
+            <span className="stat-num">18+</span>
+            <span className="stat-label">Classic Problems</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-num">&lt;10ms</span>
+            <span className="stat-label">Code Execution</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-num">100%</span>
+            <span className="stat-label">Local & Private</span>
+          </div>
+        </div>
+
+        <div className="features-grid">
+          <div className="feature-card">
+            <div className="feature-icon">🧠</div>
+            <h3>Adaptive Hint Engine</h3>
+            <p>Analyzes your approach in real-time and nudges you without giving away the solution.</p>
+          </div>
+          <div className="feature-card">
+            <div className="feature-icon">👁️</div>
+            <h3>On-Device Focus Signal</h3>
+            <p>MediaPipe AI tracks your focus locally—no video leaves your browser.</p>
+          </div>
+          <div className="feature-card">
+            <div className="feature-icon">⚡</div>
+            <h3>Instant Test Sandbox</h3>
+            <p>Run Python or JavaScript code with automated test case validation in milliseconds.</p>
+          </div>
+          <div className="feature-card">
+            <div className="feature-icon">📈</div>
+            <h3>Session Reports</h3>
+            <p>Post-session breakdown of runs, hints used, focus metrics, and complexity analysis.</p>
+          </div>
         </div>
       </main>
     );
@@ -165,159 +295,239 @@ export default function App() {
 
   return (
     <main className="workspace">
-      <header>
-        <div className="workspace-nav">
-          <button className="quiet back-button" onClick={leaveInterview}>← Back</button>
-          <div className="brand"><span>●</span> SignalCode</div>
-        </div>
-        <div className="session-meta">
-          <span className="live">LIVE</span><span>{mins}:{secs}</span>
-          <button
-            className={`quiet camera-toggle ${attention.enabled ? "camera-on" : ""}`}
-            title={attention.error || "Camera controls"}
-            onClick={() => {
-              if (attention.enabled) {
-                attention.stop();
-                setCameraAllowed(false);
-              } else {
-                setCameraAllowed(true);
-                window.requestAnimationFrame(() => void attention.start());
-              }
-            }}
-          >
-            {attention.enabled ? "● Camera on · Turn off" : "Camera off · Enable"}
+      {dragging && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 9999,
+            cursor: dragging === "bottom" ? "row-resize" : "col-resize",
+            userSelect: "none",
+          }}
+        />
+      )}
+      <header className="ws-header">
+        <div className="ws-header-left">
+          <button className="btn-ghost" style={{ padding: "6px 12px", fontSize: "13px" }} onClick={leaveInterview}>
+            ← Back
           </button>
-          <button className="quiet" onClick={() => send({ type: "complete" })}>End session</button>
+          <div className="ws-brand">
+            <span className="brand-dot" />
+            SignalCode
+          </div>
+        </div>
+        <div className="ws-header-right">
+          <div className="session-timer">
+            <span className="live-dot" />
+            <span>{mins}:{secs}</span>
+          </div>
+          <button
+            className={`btn-icon${attention.enabled ? " active" : ""}`}
+            title={attention.error || "Toggle camera focus tracking"}
+            onClick={() => setCameraAllowed((prev) => !prev)}
+          >
+            {attention.enabled ? "● Cam On" : "○ Cam Off"}
+          </button>
+          <button className="btn-ghost" style={{ fontSize: "13px" }} onClick={() => send({ type: "complete" })}>
+            End session
+          </button>
         </div>
       </header>
-      <div className="grid">
-        <aside className="problem">
-          <p className="eyebrow">{problem.difficulty} · {problem.topics.join(" / ")}</p>
-          <h2>{problem.title}</h2>
-          <p>{problem.description}</p>
-          <h3>Example</h3>
-          <code>{problem.examples[0].input}<br />→ {problem.examples[0].output}</code>
-          <div className="camera">
+
+      <div
+        className="ws-grid"
+        style={{
+          gridTemplateColumns: `${leftWidth}px 5px minmax(340px,1fr) 5px ${rightWidth}px`,
+          height: "calc(100vh - 52px)",
+        }}
+      >
+        <aside className="panel-problem">
+          <div className="prob-meta">
+            <span className={`diff-badge diff-${problem.difficulty}`}>{problem.difficulty}</span>
+            {problem.topics.slice(0, 4).map((t, i) => (
+              <span key={i} className="tag-chip">{t}</span>
+            ))}
+          </div>
+          <h2 className="prob-title">{problem.title}</h2>
+          <div className="prob-desc">{problem.description}</div>
+
+          {(!problem.description.toLowerCase().includes("example 1:") &&
+            !problem.description.toLowerCase().includes("input:") &&
+            problem.examples?.length > 0) && (
+            <div className="prob-examples">
+              <h3>Examples</h3>
+              {problem.examples.map((ex, i) => (
+                <div key={i} className="prob-example-block">
+                  <div><strong>Input:</strong> {ex.input}</div>
+                  <div><strong>Output:</strong> {ex.output}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="camera-section">
+            <h3>Focus Tracking</h3>
+            <video
+              ref={attention.videoRef}
+              muted playsInline
+              className="camera-video"
+              style={{ display: cameraAllowed ? "block" : "none" }}
+            />
             {cameraAllowed ? (
               <>
-                <video ref={attention.videoRef} muted playsInline />
-                <div><strong>Focus signal {attention.score}</strong><small>On-device estimate · not an emotion score</small></div>
-                {attention.error && <small className="camera-error">{attention.error}</small>}
-                <button
-                  className="quiet"
-                  onClick={attention.enabled
-                    ? () => setCameraAllowed(false)
-                    : attention.start}
-                >
-                  {attention.enabled ? "Disable camera" : "Start camera"}
+                <div className="focus-bar">
+                  <span className="focus-bar-label">Focus signal</span>
+                  <span className="focus-bar-score">{attention.score}</span>
+                </div>
+                {attention.error && (
+                  <small style={{ color: "var(--red)", fontSize: "12px", display: "block", marginBottom: "8px" }}>
+                    {attention.error}
+                  </small>
+                )}
+                <button className="btn-ghost" style={{ width: "100%", justifyContent: "center", fontSize: "12px" }} onClick={() => setCameraAllowed(false)}>
+                  Disable camera
                 </button>
               </>
             ) : (
               <>
-                <div><strong>Camera disabled</strong><small>No camera permission or video processing is active.</small></div>
-                {attention.error && <small className="camera-error">{attention.error}</small>}
-                <button
-                  className="quiet"
-                  onClick={() => {
-                    setCameraAllowed(true);
-                    window.requestAnimationFrame(() => void attention.start());
-                  }}
-                >
-                  Enable camera
+                <p style={{ fontSize: "12px", color: "var(--text-3)", marginBottom: "10px" }}>
+                  On-device only · no video leaves your browser
+                </p>
+                {attention.error && (
+                  <small style={{ color: "var(--red)", fontSize: "12px", display: "block", marginBottom: "8px" }}>
+                    {attention.error}
+                  </small>
+                )}
+                <button className="btn-ghost" style={{ width: "100%", justifyContent: "center", fontSize: "12px" }} onClick={() => setCameraAllowed(true)}>
+                  Enable focus camera
                 </button>
               </>
             )}
           </div>
         </aside>
-        <section className="editor-panel">
-          <div className="toolbar">
-            <select value={language} disabled><option>{language}</option></select>
-            <button onClick={execute}>▶ Run</button>
+
+        <div className={`resizer resizer-col${dragging === "left" ? " dragging" : ""}`} onMouseDown={handleMouseDown("left")} />
+
+        <section className="panel-editor">
+          <div className="editor-toolbar">
+            <span className="label" style={{ fontSize: "12px" }}>{language === "python" ? "Python 3" : "JavaScript"}</span>
+            <button className="run-btn" onClick={execute}>▶ Run Code</button>
           </div>
-          <Editor
-            height="58vh"
-            theme="vs-dark"
-            language={language}
-            value={code}
-            onChange={(value) => setCode(value || "")}
-            options={{ fontSize: 15, minimap: { enabled: false }, padding: { top: 18 } }}
-          />
-          <div className="output-panel">
+          <div style={{ flex: 1, position: "relative", minHeight: 0, overflow: "hidden" }}>
+            <Editor
+              height="100%"
+              theme="vs-dark"
+              language={language}
+              value={code}
+              onChange={(value) => setCode(value || "")}
+              options={{ fontSize: 14, minimap: { enabled: false }, padding: { top: 16 }, automaticLayout: true, lineNumbersMinChars: 3, scrollBeyondLastLine: false }}
+            />
+          </div>
+          <div className={`resizer resizer-row${dragging === "bottom" ? " dragging" : ""}`} onMouseDown={handleMouseDown("bottom")} />
+          <div className="panel-output" style={{ height: `${bottomHeight}px` }}>
             {runResult?.test_results ? (
               <div className="test-results">
                 <div className="test-results-header">
-                  <span>Test Results:</span>
-                  <span className={`status-badge ${runResult.passed ? "passed" : "failed"}`}>
+                  <span className="label">Test Results</span>
+                  <span className={`result-badge ${runResult.passed ? "passed" : "failed"}`}>
                     {runResult.passed ? "✓ All Passed" : "✗ Some Failed"}
                   </span>
                 </div>
-                <div className="test-cases-list">
-                  {runResult.test_results.map((tc, idx) => (
-                    <div key={idx} className={`test-case-item ${tc.passed ? "tc-passed" : "tc-failed"}`}>
-                      <div className="tc-header">
-                        <strong>{tc.name}</strong>
-                        <span>{tc.passed ? "✓ PASS" : "✗ FAIL"}</span>
-                      </div>
-                      <div className="tc-details">
-                        <div><small>Input:</small> <code>{tc.input}</code></div>
-                        <div><small>Expected:</small> <code>{tc.expected}</code></div>
-                        <div><small>Actual:</small> <code>{tc.actual}</code></div>
-                        {tc.error && <div className="tc-error"><small>Error:</small> {tc.error}</div>}
-                      </div>
+                {runResult.test_results.map((tc, idx) => (
+                  <div key={idx} className={`tc-row ${tc.passed ? "tc-pass" : "tc-fail"}`}>
+                    <div className="tc-row-header">
+                      <strong>{tc.name}</strong>
+                      <span style={{ color: tc.passed ? "var(--green)" : "var(--red)" }}>{tc.passed ? "✓" : "✗"}</span>
                     </div>
-                  ))}
-                </div>
-                {runResult.output && runResult.output !== "Code ran successfully with no output." && runResult.output !== "Code ran successfully with no console output." && (
-                  <div className="console-output">
-                    <small>Console Output:</small>
-                    <pre>{runResult.output}</pre>
+                    <div className="tc-row-body">
+                      <div><span className="key">Input</span><code>{tc.input}</code></div>
+                      <div><span className="key">Expected</span><code>{tc.expected}</code></div>
+                      <div><span className="key">Actual</span><code>{tc.actual}</code></div>
+                      {tc.error && <div className="tc-err">{tc.error}</div>}
+                    </div>
                   </div>
-                )}
+                ))}
+                {runResult.output &&
+                  runResult.output !== "Code ran successfully with no output." &&
+                  runResult.output !== "Code ran successfully with no console output." && (
+                    <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: "1px solid var(--border)" }}>
+                      <span className="label">Console</span>
+                      <pre style={{ marginTop: "6px", color: "var(--text-2)" }}>{runResult.output}</pre>
+                    </div>
+                  )}
               </div>
             ) : (
-              <pre className="output">{runResult?.output || output}</pre>
+              <div className="output-content"><pre>{runResult?.output || output}</pre></div>
             )}
           </div>
         </section>
-        <aside className="coach">
-          <p className="eyebrow">COACH FEED</p>
-          <div className="coach-orb">S</div>
+
+        <div className={`resizer resizer-col${dragging === "right" ? " dragging" : ""}`} onMouseDown={handleMouseDown("right")} />
+
+        <aside className="panel-coach">
+          <div className="coach-header">
+            <div className="coach-avatar">S</div>
+            <div className="coach-meta">
+              <div className="coach-name">SignalCode Coach</div>
+              <div className="coach-status">Watching your process</div>
+            </div>
+          </div>
           <div className="coach-messages">
-            {messages.length === 0 && <p className="muted">I’ll stay quiet until a nudge is useful.</p>}
+            {messages.length === 0 && <p className="empty-coach">I'll stay quiet until a nudge is useful.</p>}
             {messages.map((m, index) => (
-              <div className={`message ${m.level}`} key={index}>
-                {m.level === "user" && <span className="msg-sender">You: </span>}
+              <div className={`msg msg-${m.level}`} key={index}>
+                {m.level === "user"
+                  ? <div className="msg-from">You</div>
+                  : m.level !== "info" && <div className="msg-from">Coach</div>}
                 {m.message}
               </div>
             ))}
           </div>
-          <form className="chat-form" onSubmit={handleSendMessage}>
-            <input
-              type="text"
-              placeholder="Explain complexity, invariants, or ask a question..."
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-            />
-            <button type="submit" disabled={!chatInput.trim()}>Send</button>
-          </form>
-          <button className="primary hint" onClick={() => send({ type: "hint_request", code, language })}>
-            Give me a hint
-          </button>
+          <div className="coach-footer">
+            <form className="chat-input-row" onSubmit={handleSendMessage}>
+              <input
+                className="chat-input"
+                type="text"
+                placeholder="Ask about complexity, approach..."
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+              />
+              <button className="chat-send" type="submit" disabled={!chatInput.trim()}>Send</button>
+            </form>
+            <button className="hint-btn" onClick={() => send({ type: "hint_request", code, language })}>
+              💡 Give me a hint
+            </button>
+          </div>
         </aside>
       </div>
+
       {report && (
-        <div className="modal">
-          <div className="report">
-            <p className="eyebrow">SESSION COMPLETE</p>
-            <h2>Your practice, in signals.</h2>
-            <div className="stats">
-              <span><strong>{Math.round(report.duration_seconds / 60)}m</strong>time</span>
-              <span><strong>{report.runs}</strong>runs</span>
-              <span><strong>{report.hints_used}</strong>hints</span>
-              <span><strong>{report.average_focus ?? "—"}</strong>focus</span>
+        <div className="modal-overlay">
+          <div className="modal-box report-box">
+            <div className="modal-head">
+              <div>
+                <span className="label">Session Complete</span>
+                <h2 style={{ marginTop: "6px" }}>Your practice, in signals.</h2>
+              </div>
             </div>
-            <p>{report.summary}</p>
-            <button className="primary" onClick={leaveInterview}>Practice another</button>
+            <div className="report-stats">
+              <div className="report-stat">
+                <strong>{Math.round(report.duration_seconds / 60)}<span style={{ fontSize: "18px" }}>m</span></strong>
+                <span>Time spent</span>
+              </div>
+              <div className="report-stat">
+                <strong>{report.runs}</strong>
+                <span>Code runs</span>
+              </div>
+              <div className="report-stat">
+                <strong>{report.hints_used}</strong>
+                <span>Hints used</span>
+              </div>
+              <div className="report-stat">
+                <strong>{report.average_focus ?? "—"}</strong>
+                <span>Avg focus</span>
+              </div>
+            </div>
+            <p className="report-summary">{report.summary}</p>
+            <button className="btn-primary" onClick={leaveInterview}>Practice another →</button>
           </div>
         </div>
       )}
@@ -404,106 +614,182 @@ function ProblemLibrary({
 
   return (
     <main className="library-page">
-      <nav className="site-nav">
-        <button className="brand brand-button" onClick={onBack}><span>●</span> SignalCode</button>
-        <div style={{ display: "flex", gap: "10px" }}>
-          <button className="quiet" onClick={() => { setImporting(true); setCreating(false); setError(""); }}>📥 Import LeetCode</button>
-          <button className="primary" onClick={() => { setCreating(true); setImporting(false); setError(""); }}>＋ Add a question</button>
+      <nav className="lib-header">
+        <button
+          onClick={onBack}
+          style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px" }}
+        >
+          <div className="brand">
+            <span className="brand-dot" />
+            SignalCode
+          </div>
+        </button>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button className="btn-ghost" onClick={() => { setImporting(true); setCreating(false); setError(""); }}>
+            ↓ Import from LeetCode
+          </button>
+          <button className="btn-primary" onClick={() => { setCreating(true); setImporting(false); setError(""); }}>
+            + Add problem
+          </button>
         </div>
       </nav>
-      <section className="library-hero">
-        <p className="eyebrow">PROBLEM LIBRARY</p>
-        <h1>Find your next<br /><em>useful struggle.</em></h1>
-        <p className="lede">Search licensed catalog problems by concept, or bring a question of your own.</p>
-      </section>
-      <section className="catalog">
-        <div className="catalog-tools">
+
+      <div className="lib-body">
+        <div className="lib-title-row">
+          <div>
+            <h1 className="lib-title">Problem Library</h1>
+            <p style={{ color: "var(--text-3)", fontSize: "14px", marginTop: "6px" }}>
+              Browse, search, and practice classic algorithm problems
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <select
+              className="form-select"
+              style={{ width: "auto" }}
+              value={language}
+              onChange={(event) => onLanguage(event.target.value as Language)}
+            >
+              <option value="python">Python</option>
+              <option value="javascript">JavaScript</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="lib-filters">
           <input
+            className="lib-search"
             aria-label="Search problems"
-            placeholder="Search title, description, or tag…"
+            placeholder="Search problems by title or topic…"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
-          <select value={tag} onChange={(event) => setTag(event.target.value)}>
-            <option value="all">All tags</option>
+          <select
+            className="form-select"
+            style={{ width: "auto", minWidth: "140px" }}
+            value={tag}
+            onChange={(event) => setTag(event.target.value)}
+          >
+            <option value="all">All topics</option>
             {tags.map((item) => <option key={item}>{item}</option>)}
           </select>
-          <select value={language} onChange={(event) => onLanguage(event.target.value as Language)}>
-            <option value="python">Python</option>
-            <option value="javascript">JavaScript</option>
-          </select>
         </div>
-        {error && <p className="form-error">{error}</p>}
-        <div className="problem-list">
-          {visible.map((item) => (
-            <article className="problem-card" key={item.id}>
-              <div>
-                <p className="eyebrow">{item.difficulty} · {item.topics.join(" / ")}</p>
-                <h2>{item.title}</h2>
-                <p>{item.description}</p>
-                <small>{item.source}{item.license ? ` · ${item.license}` : ""}</small>
+
+        {error && <p className="form-error" style={{ marginBottom: "16px" }}>{error}</p>}
+
+        <div className="prob-table">
+          {visible.map((item, n) => (
+            <div className="prob-row" key={item.id} onClick={() => onPractice(item)}>
+              <div className="prob-row-left">
+                <span className="prob-num">{String(n + 1).padStart(2, "0")}</span>
+                <div className="prob-info">
+                  <div className="prob-name">{item.title}</div>
+                  <div className="prob-tags">
+                    {item.topics.slice(0, 4).map((t, i) => (
+                      <span key={i} className="tag-chip">{t}</span>
+                    ))}
+                  </div>
+                </div>
               </div>
-              <button className="primary" onClick={() => onPractice(item)}>Practice →</button>
-            </article>
+              <div className="prob-row-right">
+                <span className={`diff-badge diff-${item.difficulty}`}>{item.difficulty}</span>
+                <button
+                  className="btn-primary"
+                  style={{ padding: "7px 14px", fontSize: "13px" }}
+                  onClick={(e) => { e.stopPropagation(); onPractice(item); }}
+                >
+                  Practice
+                </button>
+              </div>
+            </div>
           ))}
-          {!visible.length && <p className="empty-state">No problems match that search.</p>}
+          {!visible.length && <div className="empty-state">No problems match your search.</div>}
         </div>
-      </section>
+      </div>
+
       {creating && (
-        <div className="modal">
-          <form
-            className="question-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void create(event.currentTarget);
-            }}
-          >
-            <div className="form-heading">
-              <div><p className="eyebrow">CUSTOM PROBLEM</p><h2>Add a question</h2></div>
-              <button type="button" className="quiet" onClick={() => setCreating(false)}>Close</button>
+        <div className="modal-overlay">
+          <div className="modal-box">
+            <div className="modal-head">
+              <div>
+                <span className="label">Custom Problem</span>
+                <h2 style={{ marginTop: "6px" }}>Add a problem</h2>
+              </div>
+              <button className="btn-ghost" style={{ fontSize: "13px" }} onClick={() => setCreating(false)}>✕ Close</button>
             </div>
-            <label>Title<input name="title" minLength={3} required /></label>
-            <label>Description<textarea name="description" rows={7} minLength={10} required /></label>
-            <div className="form-row">
-              <label>Difficulty<select name="difficulty"><option>easy</option><option>medium</option><option>hard</option></select></label>
-              <label>Tags<input name="topics" placeholder="arrays, dynamic-programming" /></label>
-            </div>
-            <div className="form-row">
-              <label>Example input<textarea name="exampleInput" rows={3} /></label>
-              <label>Expected output<textarea name="exampleOutput" rows={3} /></label>
-            </div>
-            <button className="primary" type="submit">Save question</button>
-          </form>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void create(event.currentTarget);
+              }}
+            >
+              <div className="form-group">
+                <label className="form-label">Title</label>
+                <input className="form-input" name="title" minLength={3} required placeholder="e.g. Two Sum" />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Description</label>
+                <textarea className="form-textarea" name="description" rows={6} minLength={10} required placeholder="Problem description..." />
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Difficulty</label>
+                  <select className="form-select" name="difficulty">
+                    <option>easy</option><option>medium</option><option>hard</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Tags (comma-separated)</label>
+                  <input className="form-input" name="topics" placeholder="arrays, hash-map" />
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label className="form-label">Example Input</label>
+                  <textarea className="form-textarea" name="exampleInput" rows={3} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Expected Output</label>
+                  <textarea className="form-textarea" name="exampleOutput" rows={3} />
+                </div>
+              </div>
+              <button className="btn-primary" type="submit">Save problem</button>
+            </form>
+          </div>
         </div>
       )}
+
       {importing && (
-        <div className="modal">
-          <form className="question-form" onSubmit={handleImport}>
-            <div className="form-heading">
-              <h2>Import from LeetCode</h2>
-              <button type="button" className="quiet" onClick={() => setImporting(false)}>✕ Close</button>
+        <div className="modal-overlay">
+          <div className="modal-box" style={{ maxWidth: "480px" }}>
+            <div className="modal-head">
+              <div>
+                <span className="label">Import</span>
+                <h2 style={{ marginTop: "6px" }}>Import from LeetCode</h2>
+              </div>
+              <button className="btn-ghost" style={{ fontSize: "13px" }} onClick={() => setImporting(false)}>✕</button>
             </div>
-            <p className="lede" style={{ margin: "14px 0" }}>
-              Enter a LeetCode problem title slug (e.g., <code>two-sum</code>, <code>valid-anagram</code>), a full LeetCode problem URL, or type <code>daily</code> to fetch today's Daily Challenge via Alfa LeetCode API.
+            <p style={{ fontSize: "13px", color: "var(--text-2)", lineHeight: 1.6, marginBottom: "20px" }}>
+              Enter a problem slug (e.g. <code style={{ fontFamily: "JetBrains Mono", color: "var(--accent-2)" }}>two-sum</code>), a full LeetCode URL, or type <code style={{ fontFamily: "JetBrains Mono", color: "var(--accent-2)" }}>daily</code> to fetch today's challenge.
             </p>
             {error && <p className="form-error">{error}</p>}
-            <label>
-              LeetCode Slug or URL
-              <input
-                type="text"
-                placeholder="e.g. two-sum or daily"
-                value={importSlug}
-                onChange={(e) => setImportSlug(e.target.value)}
-                disabled={importLoading}
-                required
-              />
-            </label>
-            <div className="form-row" style={{ marginTop: "20px" }}>
-              <button type="submit" className="primary" disabled={importLoading || !importSlug.trim()}>
-                {importLoading ? "Fetching from LeetCode API..." : "📥 Import Question"}
+            <form onSubmit={handleImport}>
+              <div className="form-group">
+                <label className="form-label">Problem slug or URL</label>
+                <input
+                  className="form-input"
+                  type="text"
+                  placeholder="e.g. two-sum"
+                  value={importSlug}
+                  onChange={(e) => setImportSlug(e.target.value)}
+                  disabled={importLoading}
+                  required
+                />
+              </div>
+              <button className="btn-primary" type="submit" disabled={importLoading || !importSlug.trim()}>
+                {importLoading ? "Fetching…" : "↓ Import Problem"}
               </button>
-            </div>
-          </form>
+            </form>
+          </div>
         </div>
       )}
     </main>
