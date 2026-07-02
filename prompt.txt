@@ -1,6 +1,0 @@
-Problem 'roman to integer' not found on LeetCode API.
-I want the sidebars and bottom bar to be resizelable just like in leetcode
-Failed to fetch from LeetCode API: Client error '429 Too Many Requests' for url 'https://alfa-leetcode-api.onrender.com/daily' For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429
-
-i want all the problems to be visible in the browser insed of searching
-in home page start practice should go for broswe instead of 1st problem.

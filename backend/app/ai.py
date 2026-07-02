@@ -69,7 +69,7 @@ class GeminiProvider(AIProvider):
                 json={
                     "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
                     "contents": [{"parts": [{"text": json.dumps(context)}]}],
-                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 160},
+                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 512},
                 },
             )
             response.raise_for_status()

@@ -20,6 +20,9 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(() => savedSession?.language || "python");
   const [problem, setProblem] = useState<Problem | null>(() => savedSession?.problem || null);
   const [code, setCode] = useState(() => savedSession?.code || "");
+  const [drafts, setDrafts] = useState<Partial<Record<Language, string>>>(() => (
+    savedSession?.drafts || (savedSession?.code ? { [savedSession.language || "python"]: savedSession.code } : {})
+  ));
   const [sessionId, setSessionId] = useState(() => savedSession?.sessionId || "");
   const [messages, setMessages] = useState<CoachMessage[]>(() => savedSession?.messages || []);
   const [output, setOutput] = useState(() => savedSession?.output || "Run your code when you're ready.");
@@ -34,6 +37,7 @@ export default function App() {
   const [bottomHeight, setBottomHeight] = useState(() => Number(localStorage.getItem("sc_bottom_height")) || 240);
   const [dragging, setDragging] = useState<"left" | "right" | "bottom" | null>(null);
   const socket = useRef<WebSocket | null>(null);
+  const coachMessagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const handleMouseDown = (type: "left" | "right" | "bottom") => (e: React.MouseEvent) => {
     e.preventDefault();
@@ -77,6 +81,19 @@ export default function App() {
   };
   const attention = useAttention((signal) => send({ type: "attention", ...signal }));
 
+  const languageLabel = language === "python" ? "Python 3" : language === "java" ? "Java" : "JavaScript";
+
+  function switchLanguage(nextLanguage: Language) {
+    if (nextLanguage === language) return;
+    const nextDrafts = {
+      ...drafts,
+      [language]: code,
+    };
+    setDrafts(nextDrafts);
+    setLanguage(nextLanguage);
+    setCode(nextDrafts[nextLanguage] ?? problem?.starter_code[nextLanguage] ?? "");
+  }
+
   useEffect(() => {
     if (cameraAllowed && !attention.enabled && !attention.error) {
       void attention.start();
@@ -94,11 +111,11 @@ export default function App() {
   useEffect(() => {
     if (problem && sessionId) {
       localStorage.setItem("sc_active_session", JSON.stringify({
-        view, language, problem, code, sessionId, messages, output, runResult, elapsed, cameraAllowed, returnView
+        view, language, problem, code, drafts, sessionId, messages, output, runResult, elapsed, cameraAllowed, returnView
       }));
     } else if (view === "library") {
       localStorage.setItem("sc_active_session", JSON.stringify({
-        view: "library", language, cameraAllowed, returnView
+        view: "library", language, drafts, cameraAllowed, returnView
       }));
     } else if (!problem && view === "home") {
       localStorage.removeItem("sc_active_session");
@@ -111,11 +128,15 @@ export default function App() {
       ws.onmessage = (event) => {
         const incoming: CoachMessage = JSON.parse(event.data);
         if (incoming.type === "report" && incoming.payload) setReport(incoming.payload);
-        else setMessages((current) => [...current.slice(-5), incoming]);
+        else setMessages((current) => [...current, incoming]);
       };
       socket.current = ws;
     }
   }, [sessionId]);
+
+  useEffect(() => {
+    coachMessagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -138,7 +159,13 @@ export default function App() {
     const created = await createSession(language, selectedProblem?.id);
     setProblem(created.problem);
     setSessionId(created.session_id);
-    setCode(created.problem.starter_code[language]);
+    const starterDrafts = {
+      python: created.problem.starter_code.python,
+      javascript: created.problem.starter_code.javascript,
+      java: created.problem.starter_code.java,
+    };
+    setDrafts(starterDrafts);
+    setCode(starterDrafts[language] ?? "");
     setMessages([]);
     setReport(null);
     setElapsed(0);
@@ -148,7 +175,7 @@ export default function App() {
     ws.onmessage = (event) => {
       const incoming: CoachMessage = JSON.parse(event.data);
       if (incoming.type === "report" && incoming.payload) setReport(incoming.payload);
-      else setMessages((current) => [...current.slice(-5), incoming]);
+      else setMessages((current) => [...current, incoming]);
     };
     socket.current = ws;
   }
@@ -162,6 +189,7 @@ export default function App() {
     setProblem(null);
     setSessionId("");
     setCode("");
+    setDrafts({});
     setMessages([]);
     setReport(null);
     setOutput("Run your code when you're ready.");
@@ -237,10 +265,11 @@ export default function App() {
               className="form-select"
               style={{ width: "auto" }}
               value={language}
-              onChange={(e) => setLanguage(e.target.value as Language)}
+              onChange={(e) => switchLanguage(e.target.value as Language)}
             >
               <option value="python">Python</option>
               <option value="javascript">JavaScript</option>
+              <option value="java">Java</option>
             </select>
             <button className="btn-primary" onClick={() => setView("library")}>
               Browse Problems →
@@ -287,7 +316,7 @@ export default function App() {
           <div className="feature-card">
             <div className="feature-icon">⚡</div>
             <h3>Instant Test Sandbox</h3>
-            <p>Run Python or JavaScript code with automated test case validation in milliseconds.</p>
+            <p>Run Python, JavaScript, or Java code with automated test case validation in milliseconds.</p>
           </div>
           <div className="feature-card">
             <div className="feature-icon">📈</div>
@@ -414,7 +443,19 @@ export default function App() {
 
         <section className="panel-editor">
           <div className="editor-toolbar">
-            <span className="label" style={{ fontSize: "12px" }}>{language === "python" ? "Python 3" : "JavaScript"}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span className="label" style={{ fontSize: "12px" }}>{languageLabel}</span>
+              <select
+                className="form-select"
+                style={{ width: "auto", minWidth: "120px" }}
+                value={language}
+                onChange={(event) => switchLanguage(event.target.value as Language)}
+              >
+                <option value="python">Python</option>
+                <option value="javascript">JavaScript</option>
+                <option value="java">Java</option>
+              </select>
+            </div>
             <button className="run-btn" onClick={execute}>▶ Run Code</button>
           </div>
           <div style={{ flex: 1, position: "relative", minHeight: 0, overflow: "hidden" }}>
@@ -423,7 +464,11 @@ export default function App() {
               theme="vs-dark"
               language={language}
               value={code}
-              onChange={(value) => setCode(value || "")}
+              onChange={(value) => {
+                const nextCode = value || "";
+                setCode(nextCode);
+                setDrafts((current) => ({ ...current, [language]: nextCode }));
+              }}
               options={{ fontSize: 14, minimap: { enabled: false }, padding: { top: 16 }, automaticLayout: true, lineNumbersMinChars: 3, scrollBeyondLastLine: false }}
             />
           </div>
@@ -486,6 +531,7 @@ export default function App() {
                 {m.message}
               </div>
             ))}
+            <div ref={coachMessagesEndRef} />
           </div>
           <div className="coach-footer">
             <form className="chat-input-row" onSubmit={handleSendMessage}>
@@ -593,6 +639,7 @@ function ProblemLibrary({
         starter_code: {
           python: "# Write your solution here\n",
           javascript: "// Write your solution here\n",
+          java: "// Write your solution here\n",
         },
       });
       setProblems((current) => [added, ...current]);
@@ -659,6 +706,7 @@ function ProblemLibrary({
             >
               <option value="python">Python</option>
               <option value="javascript">JavaScript</option>
+              <option value="java">Java</option>
             </select>
           </div>
         </div>
