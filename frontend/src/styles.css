@@ -309,7 +309,7 @@ h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacin
 .form-textarea { resize: vertical; }
 
 /* ── Workspace ─────────────────────────────────────────────────────────────── */
-.workspace { min-height: 100vh; background: var(--bg); display: flex; flex-direction: column; }
+.workspace { height: 100vh; width: 100vw; overflow: hidden; background: var(--bg); display: flex; flex-direction: column; }
 
 .ws-header {
   height: 52px;
@@ -351,6 +351,7 @@ h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacin
 .ws-grid {
   display: grid;
   flex: 1;
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   min-height: 0;
 }
@@ -432,7 +433,7 @@ h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacin
 .focus-bar-score { font-family: "JetBrains Mono", monospace; font-size: 13px; font-weight: 600; color: var(--accent-2); }
 
 /* ── Editor panel ──────────────────────────────────────────────────────────── */
-.panel-editor { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg); }
+.panel-editor { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg); min-height: 0; }
 
 .editor-toolbar {
   height: 44px;
@@ -465,11 +466,22 @@ h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacin
 .panel-output {
   border-top: 1px solid var(--border);
   background: var(--bg-2);
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  /* Ensure it never overflows its flex parent */
+  min-height: 0;
+  /* Allow scroll on hover without needing a click first */
+  pointer-events: auto;
+  outline: none;
 }
+.panel-output::-webkit-scrollbar { width: 6px; }
+.panel-output::-webkit-scrollbar-track { background: transparent; }
+.panel-output::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 3px; }
+.panel-output::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+
 .output-tabs {
   display: flex;
   border-bottom: 1px solid var(--border);

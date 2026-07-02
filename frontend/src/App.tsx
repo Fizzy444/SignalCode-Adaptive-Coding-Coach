@@ -58,7 +58,9 @@ export default function App() {
         setRightWidth(next);
         localStorage.setItem("sc_right_width", String(next));
       } else if (type === "bottom") {
-        const next = Math.max(80, Math.min(window.innerHeight - 200, startBottom - (moveEvent.clientY - startY)));
+        // Max: viewport - ws-header(52) - editor-toolbar(44) - resizer(5) - min editor area(100)
+        const maxBottom = window.innerHeight - 52 - 44 - 5 - 100;
+        const next = Math.max(80, Math.min(maxBottom, startBottom - (moveEvent.clientY - startY)));
         setBottomHeight(next);
         localStorage.setItem("sc_bottom_height", String(next));
       }
@@ -473,7 +475,21 @@ export default function App() {
             />
           </div>
           <div className={`resizer resizer-row${dragging === "bottom" ? " dragging" : ""}`} onMouseDown={handleMouseDown("bottom")} />
-          <div className="panel-output" style={{ height: `${bottomHeight}px` }}>
+          <div
+            className="panel-output"
+            tabIndex={0}
+            onMouseEnter={(e) => {
+              e.currentTarget.focus({ preventScroll: true });
+            }}
+            onWheel={(e) => {
+              e.stopPropagation();
+            }}
+            style={{
+              height: `${bottomHeight}px`,
+              maxHeight: "calc(100% - 100px)",
+              overflowY: "auto",
+            }}
+          >
             {runResult?.test_results ? (
               <div className="test-results">
                 <div className="test-results-header">
