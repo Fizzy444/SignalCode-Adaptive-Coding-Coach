@@ -48,3 +48,14 @@ export interface CoachMessage {
   payload?: Report;
 }
 
+export interface User {
+  username: string;
+  completed_problems: string[];
+}
+
+export interface UserProfile {
+  username: string;
+  completed_problems: Problem[];
+  total_completed: number;
+}
+

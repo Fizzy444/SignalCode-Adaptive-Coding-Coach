@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
-import { addProblem, connectCoach, createSession, getProblems, importProblem } from "./api";
+import { addProblem, connectCoach, createSession, getProblems, importProblem, markProblemCompletedUser, syncCompletedProblemsUser } from "./api";
 import { runCode } from "./runner";
-import type { CoachMessage, CodeRunResult, Language, Problem, Report } from "./types";
+import type { CoachMessage, CodeRunResult, Language, Problem, Report, User } from "./types";
 import { useAttention } from "./useAttention";
+import Login from "./Login";
+import Profile from "./Profile";
 import "./styles.css";
 
 export default function App() {
@@ -16,7 +18,7 @@ export default function App() {
     }
   }, []);
 
-  const [view, setView] = useState<"home" | "library">(() => savedSession?.view || "home");
+  const [view, setView] = useState<"home" | "library" | "login" | "profile">(() => savedSession?.view || "home");
   const [language, setLanguage] = useState<Language>(() => savedSession?.language || "python");
   const [problem, setProblem] = useState<Problem | null>(() => savedSession?.problem || null);
   const [code, setCode] = useState(() => savedSession?.code || "");
@@ -31,7 +33,7 @@ export default function App() {
   const [elapsed, setElapsed] = useState(() => savedSession?.elapsed || 0);
   const [report, setReport] = useState<Report | null>(null);
   const [cameraAllowed, setCameraAllowed] = useState(() => Boolean(savedSession?.cameraAllowed));
-  const [returnView, setReturnView] = useState<"home" | "library">(() => savedSession?.returnView || "home");
+  const [returnView, setReturnView] = useState<"home" | "library" | "login" | "profile">(() => savedSession?.returnView || "home");
   const [mobileTab, setMobileTab] = useState<"problem" | "editor" | "coach">("problem");
   const [leftWidth, setLeftWidth] = useState(() => Number(localStorage.getItem("sc_left_width")) || 300);
   const [rightWidth, setRightWidth] = useState(() => Number(localStorage.getItem("sc_right_width")) || 320);
@@ -45,12 +47,87 @@ export default function App() {
       return [];
     }
   });
+  const [user, setUser] = useState<User | null>(() => {
+    try {
+      const item = localStorage.getItem("sc_current_user");
+      return item ? JSON.parse(item) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  function handleLoginSuccess(loggedInUser: User) {
+    setUser(loggedInUser);
+    localStorage.setItem("sc_current_user", JSON.stringify(loggedInUser));
+    if (completedProblems.length > 0) {
+      syncCompletedProblemsUser(loggedInUser.username, completedProblems)
+        .then((updatedUser) => {
+          setUser(updatedUser);
+          localStorage.setItem("sc_current_user", JSON.stringify(updatedUser));
+          setCompletedProblems(updatedUser.completed_problems);
+          localStorage.setItem("sc_completed_problems", JSON.stringify(updatedUser.completed_problems));
+        })
+        .catch(() => {});
+    } else if (loggedInUser.completed_problems.length > 0) {
+      setCompletedProblems(loggedInUser.completed_problems);
+      localStorage.setItem("sc_completed_problems", JSON.stringify(loggedInUser.completed_problems));
+    }
+    setView(returnView === "login" ? "home" : returnView);
+  }
+
+  function handleLogout() {
+    setUser(null);
+    localStorage.removeItem("sc_current_user");
+    if (view === "profile") {
+      setView("home");
+    }
+  }
+
+  const renderNavActions = () => {
+    if (user) {
+      return (
+        <div className="nav-auth-actions">
+          <button
+            className="nav-user-badge"
+            onClick={() => { setReturnView(view); setView("profile"); }}
+          >
+            <span className="nav-user-avatar">{user.username.slice(0, 2)}</span>
+            <span>@{user.username}</span>
+          </button>
+          <button
+            className="btn-ghost"
+            style={{ padding: "6px 12px", fontSize: "13px" }}
+            onClick={handleLogout}
+          >
+            Log out
+          </button>
+        </div>
+      );
+    }
+    return (
+      <button
+        className="btn-ghost"
+        style={{ padding: "6px 14px", fontSize: "13px", borderColor: "var(--accent)", color: "var(--text)" }}
+        onClick={() => { setReturnView(view); setView("login"); }}
+      >
+        Log in / Sign up
+      </button>
+    );
+  };
 
   function markCompleted(id: string) {
     setCompletedProblems((prev) => {
       if (prev.includes(id)) return prev;
       const next = [...prev, id];
       localStorage.setItem("sc_completed_problems", JSON.stringify(next));
+      if (user) {
+        markProblemCompletedUser(user.username, id)
+          .then((updatedUser) => {
+            setUser(updatedUser);
+            localStorage.setItem("sc_current_user", JSON.stringify(updatedUser));
+          })
+          .catch(() => {});
+      }
       return next;
     });
   }
@@ -283,6 +360,41 @@ export default function App() {
   const secs = String(elapsed % 60).padStart(2, "0");
 
   if (!problem) {
+    if (view === "login") {
+      return (
+        <>
+          <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
+          <Login
+            onLogin={handleLoginSuccess}
+            onBack={() => setView(returnView === "login" ? "home" : returnView)}
+          />
+        </>
+      );
+    }
+    if (view === "profile") {
+      if (!user) {
+        return (
+          <>
+            <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
+            <Login
+              onLogin={handleLoginSuccess}
+              onBack={() => setView("home")}
+            />
+          </>
+        );
+      }
+      return (
+        <>
+          <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
+          <Profile
+            username={user.username}
+            onBack={() => setView(returnView === "profile" ? "home" : returnView)}
+            onSelectProblem={begin}
+            onBrowse={() => setView("library")}
+          />
+        </>
+      );
+    }
     if (view === "library") {
       return (
         <>
@@ -293,6 +405,7 @@ export default function App() {
             onBack={() => setView("home")}
             onPractice={begin}
             completedProblems={completedProblems}
+            navActions={renderNavActions()}
           />
         </>
       );
@@ -305,7 +418,10 @@ export default function App() {
             <span className="brand-dot" />
             SignalCode
           </div>
-          <button className="btn-ghost" onClick={() => setView("library")}>Browse problems</button>
+          <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+            <button className="btn-ghost" onClick={() => setView("library")}>Browse problems</button>
+            {renderNavActions()}
+          </div>
         </nav>
 
         <div className="hero-section">
@@ -407,6 +523,7 @@ export default function App() {
           </div>
         </div>
         <div className="ws-header-right">
+          {renderNavActions()}
           <div className="session-timer">
             <span className="live-dot" />
             <span>{mins}:{secs}</span>
@@ -697,12 +814,14 @@ function ProblemLibrary({
   onBack,
   onPractice,
   completedProblems,
+  navActions,
 }: {
   language: Language;
   onLanguage: (language: Language) => void;
   onBack: () => void;
   onPractice: (problem: Problem) => void;
   completedProblems: string[];
+  navActions?: React.ReactNode;
 }) {
   const [problems, setProblems] = useState<Problem[]>([]);
   const [query, setQuery] = useState("");
@@ -801,6 +920,7 @@ function ProblemLibrary({
           <button className="btn-primary" onClick={() => { setCreating(true); setImporting(false); setError(""); }}>
             + Add problem
           </button>
+          {navActions}
         </div>
       </nav>
 

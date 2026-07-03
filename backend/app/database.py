@@ -41,6 +41,13 @@ def initialize() -> None:
                 topics TEXT NOT NULL, description TEXT NOT NULL, examples TEXT NOT NULL,
                 starter_code TEXT NOT NULL, created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY, password TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS user_completed_problems (
+                username TEXT NOT NULL, problem_id TEXT NOT NULL, completed_at TEXT NOT NULL,
+                PRIMARY KEY (username, problem_id)
+            );
             """
         )
 
@@ -140,3 +147,54 @@ def load_custom_problems() -> list[dict]:
         }
         for row in rows
     ]
+
+
+def get_user_by_username(username: str) -> dict | None:
+    with connection() as db:
+        row = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    return dict(row) if row else None
+
+
+def create_user(username: str, password_hash: str) -> dict:
+    created_time = now()
+    with connection() as db:
+        db.execute(
+            "INSERT INTO users (username, password, created_at) VALUES (?, ?, ?)",
+            (username, password_hash, created_time),
+        )
+    return {"username": username, "password": password_hash, "created_at": created_time}
+
+
+def add_user_completed_problem(username: str, problem_id: str) -> None:
+    with connection() as db:
+        db.execute(
+            """
+            INSERT OR IGNORE INTO user_completed_problems (username, problem_id, completed_at)
+            VALUES (?, ?, ?)
+            """,
+            (username, problem_id, now()),
+        )
+
+
+def sync_user_completed_problems(username: str, problem_ids: list[str]) -> None:
+    if not problem_ids:
+        return
+    time_str = now()
+    with connection() as db:
+        for pid in problem_ids:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO user_completed_problems (username, problem_id, completed_at)
+                VALUES (?, ?, ?)
+                """,
+                (username, pid, time_str),
+            )
+
+
+def get_user_completed_problems(username: str) -> list[str]:
+    with connection() as db:
+        rows = db.execute(
+            "SELECT problem_id FROM user_completed_problems WHERE username=? ORDER BY completed_at DESC",
+            (username,),
+        ).fetchall()
+    return [row["problem_id"] for row in rows]

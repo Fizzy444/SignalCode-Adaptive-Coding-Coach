@@ -1,4 +1,4 @@
-import type { Language, Problem } from "./types";
+import type { Language, Problem, User, UserProfile } from "./types";
 
 const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
 const isNetworkHost = host !== "localhost" && host !== "127.0.0.1";
@@ -53,5 +53,44 @@ export async function importProblem(slug: string): Promise<Problem> {
 
 export function connectCoach(sessionId: string): WebSocket {
   return new WebSocket(`${WS_URL}/ws/${sessionId}`);
+}
+
+export async function loginUser(username: string, password: string): Promise<User> {
+  const response = await fetch(`${API_URL}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || "Authentication failed");
+  }
+  return response.json();
+}
+
+export async function markProblemCompletedUser(username: string, problemId: string): Promise<User> {
+  const response = await fetch(`${API_URL}/api/users/${encodeURIComponent(username)}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ problem_id: problemId }),
+  });
+  if (!response.ok) throw new Error("Could not record problem completion");
+  return response.json();
+}
+
+export async function syncCompletedProblemsUser(username: string, problemIds: string[]): Promise<User> {
+  const response = await fetch(`${API_URL}/api/users/${encodeURIComponent(username)}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ problem_ids: problemIds }),
+  });
+  if (!response.ok) throw new Error("Could not sync completed problems");
+  return response.json();
+}
+
+export async function getUserProfile(username: string): Promise<UserProfile> {
+  const response = await fetch(`${API_URL}/api/users/${encodeURIComponent(username)}/profile`);
+  if (!response.ok) throw new Error("Could not load user profile");
+  return response.json();
 }
 

@@ -90,3 +90,27 @@ class CoachMessage(BaseModel):
     message: str = ""
     level: Literal["info", "nudge", "hint", "celebrate", "user"] = "info"
     payload: dict | None = None
+
+
+class UserLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1, max_length=100)
+
+
+class UserResponse(BaseModel):
+    username: str
+    completed_problems: list[str]
+
+
+class ProblemCompleteRequest(BaseModel):
+    problem_id: str
+
+
+class ProblemSyncRequest(BaseModel):
+    problem_ids: list[str] = Field(default_factory=list)
+
+
+class UserProfileResponse(BaseModel):
+    username: str
+    completed_problems: list[Problem]
+    total_completed: int

@@ -1,4 +1,6 @@
+import hashlib
 import html
+import os
 import re
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -8,12 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from .coach import CoachState
 from .config import get_settings
 from .database import (
-    create_session, finish_session, get_session, initialize, save_custom_problem, save_event,
-    session_report,
+    add_user_completed_problem, create_session, create_user, finish_session, get_session,
+    get_user_by_username, get_user_completed_problems, initialize, save_custom_problem, save_event,
+    session_report, sync_user_completed_problems,
 )
 from .models import (
     ClientEvent, CoachMessage, CodeRunRequest, CodeRunResult, Problem,
-    ProblemCreate, ProblemImportRequest, SessionCreate, SessionCreated,
+    ProblemCompleteRequest, ProblemCreate, ProblemImportRequest, ProblemSyncRequest,
+    SessionCreate, SessionCreated, UserLoginRequest, UserProfileResponse, UserResponse,
 )
 from .problems import get_problem, search_problems, select_problem
 from .sandbox import run_code
@@ -265,3 +269,71 @@ async def interview_socket(websocket: WebSocket, session_id: str):
                 await websocket.send_json(message.model_dump())
     except WebSocketDisconnect:
         pass
+
+
+def hash_password(password: str, salt: bytes | None = None) -> str:
+    if salt is None:
+        salt = os.urandom(16)
+    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000)
+    return salt.hex() + ":" + key.hex()
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        salt_hex, _ = hashed.split(":")
+        salt = bytes.fromhex(salt_hex)
+        return hash_password(password, salt) == hashed
+    except Exception:
+        return False
+
+
+@app.post("/api/auth/login", response_model=UserResponse)
+async def login(request: UserLoginRequest):
+    user = get_user_by_username(request.username)
+    if not user:
+        pwd_hash = hash_password(request.password)
+        create_user(request.username, pwd_hash)
+        return UserResponse(username=request.username, completed_problems=[])
+    else:
+        if not verify_password(request.password, user["password"]):
+            raise HTTPException(status_code=401, detail="Incorrect password")
+        completed = get_user_completed_problems(request.username)
+        return UserResponse(username=request.username, completed_problems=completed)
+
+
+@app.post("/api/users/{username}/complete", response_model=UserResponse)
+async def complete_problem(username: str, request: ProblemCompleteRequest):
+    user = get_user_by_username(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    add_user_completed_problem(username, request.problem_id)
+    completed = get_user_completed_problems(username)
+    return UserResponse(username=username, completed_problems=completed)
+
+
+@app.post("/api/users/{username}/sync", response_model=UserResponse)
+async def sync_completed(username: str, request: ProblemSyncRequest):
+    user = get_user_by_username(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    sync_user_completed_problems(username, request.problem_ids)
+    completed = get_user_completed_problems(username)
+    return UserResponse(username=username, completed_problems=completed)
+
+
+@app.get("/api/users/{username}/profile", response_model=UserProfileResponse)
+async def get_profile(username: str):
+    user = get_user_by_username(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    completed_ids = get_user_completed_problems(username)
+    completed_problems = []
+    for pid in completed_ids:
+        p = get_problem(pid)
+        if p:
+            completed_problems.append(p)
+    return UserProfileResponse(
+        username=username,
+        completed_problems=completed_problems,
+        total_completed=len(completed_problems)
+    )
