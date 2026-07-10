@@ -53,3 +53,8 @@ pnpm-debug.log*
 *~
 .DS_Store
 Thumbs.db
+
+# Readme files
+SignalCode_Project_Documentation.txt
+SignalCode_Project_Documentation.md
+SignalCode_Project_Documentation.html
