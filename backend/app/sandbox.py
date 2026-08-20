@@ -73,6 +73,20 @@ def _validate_java(code: str) -> str | None:
     return None
 
 
+def _validate_c_cpp(code: str) -> str | None:
+    compact = re.sub(r"\s+", "", code).lower()
+    blocked = [
+        "system(", "popen(", "fork(", "exec(", "execv(", "execve(",
+        "fopen(", "freopen(", "remove(", "rename(",
+        "socket(", "connect(", "bind(", "listen(", "accept("
+    ]
+    if any(token in compact for token in blocked):
+        return "SandboxError: filesystem, process, and network APIs are disabled."
+    return None
+
+
+
+
 def _java_main_class(code: str) -> str | None:
     public_class = re.search(
         r"\bpublic\s+(?:final\s+|abstract\s+)?class\s+([A-Za-z_$][\w$]*)",
@@ -92,11 +106,47 @@ import sys
 import json
 import ast
 
+class ListNode:
+    def __init__(self, val=0, next=None):
+        self.val = val
+        self.next = next
+    def __repr__(self):
+        vals = []
+        curr = self
+        visited = set()
+        while curr and id(curr) not in visited and len(vals) < 100:
+            visited.add(id(curr))
+            vals.append(curr.val)
+            curr = curr.next
+        return str(vals)
+
+def _to_linked_list(arr):
+    if not isinstance(arr, list) or not arr:
+        return None
+    head = ListNode(arr[0])
+    curr = head
+    for v in arr[1:]:
+        curr.next = ListNode(v)
+        curr = curr.next
+    return head
+
+def _from_linked_list(node):
+    if not hasattr(node, "val") or not hasattr(node, "next"):
+        return node
+    vals = []
+    visited = set()
+    while node and id(node) not in visited and len(vals) < 1000:
+        visited.add(id(node))
+        vals.append(node.val)
+        node = node.next
+    return vals
+
 _signalcode_tests = json.loads({repr(tc_json)})
 _signalcode_results = []
 
 _candidates = [_val for _name, _val in list(globals().items()) if callable(_val) and not _name.startswith("_") and hasattr(_val, "__code__") and hasattr(_val, "__module__") and _val.__module__ == __name__]
 _candidate_fn = None
+
 for _idx, _tc in enumerate(_signalcode_tests):
     _name = _tc.get("name") or f"Test {{_idx + 1}}"
     _input_str = _tc.get("input", "").strip()
@@ -104,11 +154,16 @@ for _idx, _tc in enumerate(_signalcode_tests):
     _actual_str = ""
     _passed = False
     _error = None
+    _tc_stdout = ""
     try:
         if not _candidates:
             raise RuntimeError("No top-level function found to test.")
         
-        _local_vars = {{}}
+        _scope = dict(globals())
+        _scope["ListNode"] = ListNode
+        _scope["_to_linked_list"] = _to_linked_list
+        _scope["_from_linked_list"] = _from_linked_list
+        _user_vars = dict()
         if "=" in _input_str:
             _lines = []
             _curr = []
@@ -124,10 +179,10 @@ for _idx, _tc in enumerate(_signalcode_tests):
             if _curr:
                 _lines.append("".join(_curr).strip())
             _exec_str = "\\n".join(_lines)
-            exec(_exec_str, {{}}, _local_vars)
-            _args = list(_local_vars.values())
+            exec(_exec_str, _scope, _user_vars)
+            _args = list(_user_vars.values())
         else:
-            _eval_val = eval(f"({{_input_str}},)") if _input_str else ()
+            _eval_val = eval(f"({{_input_str}},)", _scope, {{}}) if _input_str else ()
             _args = list(_eval_val)
             
         _candidate_fn = None
@@ -138,8 +193,27 @@ for _idx, _tc in enumerate(_signalcode_tests):
         if not _candidate_fn:
             _candidate_fn = _candidates[-1]
             
-        _res = _candidate_fn(*_args)
+        import io
+        import sys
+        _orig_stdout = sys.stdout
+        _stdout_cap = io.StringIO()
+        sys.stdout = _stdout_cap
+        try:
+            try:
+                _res = _candidate_fn(*_args)
+            except (AttributeError, TypeError) as _first_err:
+                _ll_args = [_to_linked_list(a) if isinstance(a, list) else a for a in _args]
+                if _ll_args != _args:
+                    _res = _candidate_fn(*_ll_args)
+                else:
+                    raise _first_err
+        finally:
+            sys.stdout = _orig_stdout
+            _tc_stdout = _stdout_cap.getvalue()
         
+        if hasattr(_res, "val") and hasattr(_res, "next"):
+            _res = _from_linked_list(_res)
+            
         if isinstance(_res, (list, dict, tuple)):
             _actual_str = json.dumps(_res)
         elif isinstance(_res, bool):
@@ -172,7 +246,8 @@ for _idx, _tc in enumerate(_signalcode_tests):
         "expected": _expected_str,
         "actual": _actual_str,
         "passed": _passed,
-        "error": _error
+        "error": _error,
+        "stdout": _tc_stdout
     }})
 
 print("\\n---SIGNALCODE_TEST_RESULTS---")
@@ -245,7 +320,19 @@ for (let _idx = 0; _idx < _signalcode_tests.length; _idx++) {{
       _args = new Function(`return [${{_input_str}}];`)();
     }}
     
-    const _res = _candidate_fn(..._args);
+    let _orig_log = console.log;
+    let _tc_stdout = "";
+    console.log = function(...args) {{
+      _tc_stdout += args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ') + '\\n';
+    }};
+    
+    let _res;
+    try {{
+      _res = _candidate_fn(..._args);
+    }} finally {{
+      console.log = _orig_log;
+    }}
+    
     if (typeof _res === 'object' && _res !== null) {{
       _actual_str = JSON.stringify(_res);
     }} else {{
@@ -278,7 +365,8 @@ for (let _idx = 0; _idx < _signalcode_tests.length; _idx++) {{
     expected: _expected_str,
     actual: _actual_str,
     passed: _passed,
-    error: _error
+    error: _error,
+    stdout: _tc_stdout
   }});
 }}
 console.log("\\n---SIGNALCODE_TEST_RESULTS---");
@@ -291,6 +379,8 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
         "python": _validate_python,
         "javascript": _validate_javascript,
         "java": _validate_java,
+        "c": _validate_c_cpp,
+        "cpp": _validate_c_cpp,
     }
     validator = validators.get(language)
     if validator is None:
@@ -303,15 +393,9 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
     if validation_error:
         return CodeRunResult(output=validation_error, exit_code=1, passed=False)
 
-    if language == "java" and test_cases:
-        return CodeRunResult(
-            output="SandboxError: Java test-case harnesses are not supported yet; run a complete program with main().",
-            exit_code=1,
-            passed=False,
-        )
 
-    suffix = {"python": ".py", "javascript": ".js", "java": ".java"}[language]
-    executable = {"python": "python", "javascript": "node", "java": "java"}[language]
+    suffix = {"python": ".py", "javascript": ".js", "java": ".java", "c": ".c", "cpp": ".cpp"}[language]
+    executable = {"python": "python", "javascript": "node", "java": "java", "c": "gcc", "cpp": "g++"}[language]
     args = [executable]
     if language == "python":
         args.extend(["-I", "-B"])
@@ -320,7 +404,7 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
     if test_cases:
         if language == "python":
             run_source_code += _generate_python_harness(test_cases)
-        else:
+        elif language == "javascript":
             run_source_code += _generate_javascript_harness(code, test_cases)
 
     with tempfile.TemporaryDirectory(prefix="signalcode-run-") as directory:
@@ -335,6 +419,9 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
         source.write_text(run_source_code, encoding="utf-8")
         if language == "java":
             args.extend(["-cp", directory, java_class])
+        elif language in ("c", "cpp"):
+            out_bin = Path(directory) / "a.out"
+            args = [str(out_bin)]
         else:
             args.append(str(source))
         environment = {
@@ -348,9 +435,15 @@ def run_code(language: str, code: str, problem_id: str | None = None, test_cases
             "NO_COLOR": "1",
         }
         try:
-            if language == "java":
+            if language in ("java", "c", "cpp"):
+                compile_cmd = ["javac", "-encoding", "UTF-8", "-d", directory, str(source)]
+                if language == "c":
+                    compile_cmd = ["gcc", "-O2", "-Wall", str(source), "-o", str(out_bin), "-lm"]
+                elif language == "cpp":
+                    compile_cmd = ["g++", "-O2", "-Wall", "-std=c++17", str(source), "-o", str(out_bin), "-lm"]
+                
                 compiled = subprocess.run(
-                    ["javac", "-encoding", "UTF-8", "-d", directory, str(source)],
+                    compile_cmd,
                     cwd=directory,
                     env=environment,
                     stdin=subprocess.DEVNULL,

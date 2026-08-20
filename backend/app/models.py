@@ -2,7 +2,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-Language = Literal["python", "javascript", "java"]
+Language = Literal["python", "javascript", "java", "c", "cpp"]
 
 
 class Problem(BaseModel):
@@ -28,7 +28,7 @@ class ProblemCreate(BaseModel):
     examples: list[dict[str, str]] = Field(default_factory=list, max_length=10)
     test_cases: list[dict[str, str]] = Field(default_factory=list, max_length=20)
     starter_code: dict[Language, str] = Field(
-        default_factory=lambda: {"python": "", "javascript": "", "java": ""}
+        default_factory=lambda: {"python": "", "javascript": "", "java": "", "c": "", "cpp": ""}
     )
 
 
@@ -52,6 +52,7 @@ class TestCaseResult(BaseModel):
     actual: str
     passed: bool
     error: str | None = None
+    stdout: str | None = None
 
 
 class CodeRunResult(BaseModel):
@@ -97,8 +98,15 @@ class UserLoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=100)
 
 
+class UserSignupRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=50)
+    email: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=1, max_length=100)
+
+
 class UserResponse(BaseModel):
     username: str
+    email: str | None = None
     completed_problems: list[str]
 
 
@@ -114,3 +122,9 @@ class UserProfileResponse(BaseModel):
     username: str
     completed_problems: list[Problem]
     total_completed: int
+
+
+class UserSearchResult(BaseModel):
+    username: str
+    total_completed: int = 0
+    created_at: str | None = None

@@ -1,12 +1,78 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import Editor from "@monaco-editor/react";
-import { addProblem, connectCoach, createSession, getProblems, importProblem, markProblemCompletedUser, syncCompletedProblemsUser } from "./api";
-import { runCode } from "./runner";
-import type { CoachMessage, CodeRunResult, Language, Problem, Report, User } from "./types";
+import { useLocation, useNavigate } from "react-router-dom";
+import {
+  createSession,
+  connectCoach,
+  markProblemCompletedUser,
+  syncCompletedProblemsUser,
+} from "./api";
 import { useAttention } from "./useAttention";
-import Login from "./Login";
-import Profile from "./Profile";
+import LandingScreen from "./screens/LandingScreen";
+import CatalogScreen from "./screens/CatalogScreen";
+import InterviewScreen from "./screens/InterviewScreen";
+import ReportScreen from "./screens/ReportScreen";
+import ProfileScreen from "./screens/ProfileScreen";
+import LoginScreen from "./screens/LoginScreen";
+import SignupScreen from "./screens/SignupScreen";
+import type { CoachMessage, CodeRunResult, Language, Problem, Report, User } from "./types";
 import "./styles.css";
+
+// Helper functions for persistent problem drafts
+function getProblemDraftsMap(): Record<string, {
+  language: Language;
+  code: string;
+  drafts: Partial<Record<Language, string>>;
+  messages?: CoachMessage[];
+  output?: string;
+  runResult?: CodeRunResult | null;
+  elapsed?: number;
+  updatedAt?: number;
+}> {
+  try {
+    const raw = localStorage.getItem("sc_problem_drafts");
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function getProblemSavedData(problemId?: string | null) {
+  if (!problemId) return null;
+  const map = getProblemDraftsMap();
+  return map[problemId] || null;
+}
+
+function saveProblemDraft(
+  problemId?: string | null,
+  lang?: Language,
+  codeStr?: string,
+  allDrafts?: Partial<Record<Language, string>>,
+  extra?: { messages?: CoachMessage[]; output?: string; runResult?: CodeRunResult | null; elapsed?: number }
+) {
+  if (!problemId || !lang || codeStr === undefined) return;
+  try {
+    const map = getProblemDraftsMap();
+    const existing = map[problemId] || {};
+    map[problemId] = {
+      ...existing,
+      language: lang,
+      code: codeStr,
+      drafts: {
+        ...(existing.drafts || {}),
+        ...(allDrafts || {}),
+        [lang]: codeStr,
+      },
+      messages: extra?.messages ?? existing.messages ?? [],
+      output: extra?.output ?? existing.output ?? "Run your code when you're ready.",
+      runResult: extra?.runResult ?? existing.runResult ?? null,
+      elapsed: extra?.elapsed ?? existing.elapsed ?? 0,
+      updatedAt: Date.now(),
+    };
+    localStorage.setItem("sc_problem_drafts", JSON.stringify(map));
+  } catch (e) {
+    console.error("Failed to save problem draft", e);
+  }
+}
 
 export default function App() {
   const savedSession = useMemo(() => {
@@ -18,7 +84,11 @@ export default function App() {
     }
   }, []);
 
-  const [view, setView] = useState<"home" | "library" | "login" | "profile">(() => savedSession?.view || "home");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const view = location.pathname === "/" ? "home" : location.pathname.slice(1);
+  const setView = (v: string) => navigate(v === "home" ? "/" : "/" + v);
+
   const [language, setLanguage] = useState<Language>(() => savedSession?.language || "python");
   const [problem, setProblem] = useState<Problem | null>(() => savedSession?.problem || null);
   const [code, setCode] = useState(() => savedSession?.code || "");
@@ -27,18 +97,11 @@ export default function App() {
   ));
   const [sessionId, setSessionId] = useState(() => savedSession?.sessionId || "");
   const [messages, setMessages] = useState<CoachMessage[]>(() => savedSession?.messages || []);
-  const [output, setOutput] = useState(() => savedSession?.output || "Run your code when you're ready.");
-  const [runResult, setRunResult] = useState<CodeRunResult | null>(() => savedSession?.runResult || null);
-  const [chatInput, setChatInput] = useState("");
   const [elapsed, setElapsed] = useState(() => savedSession?.elapsed || 0);
   const [report, setReport] = useState<Report | null>(null);
   const [cameraAllowed, setCameraAllowed] = useState(() => Boolean(savedSession?.cameraAllowed));
-  const [returnView, setReturnView] = useState<"home" | "library" | "login" | "profile">(() => savedSession?.returnView || "home");
-  const [mobileTab, setMobileTab] = useState<"problem" | "editor" | "coach">("problem");
-  const [leftWidth, setLeftWidth] = useState(() => Number(localStorage.getItem("sc_left_width")) || 300);
-  const [rightWidth, setRightWidth] = useState(() => Number(localStorage.getItem("sc_right_width")) || 320);
-  const [bottomHeight, setBottomHeight] = useState(() => Number(localStorage.getItem("sc_bottom_height")) || 240);
-  const [dragging, setDragging] = useState<"left" | "right" | "bottom" | null>(null);
+  const [returnView, setReturnView] = useState<string>(() => savedSession?.returnView || "home");
+
   const [completedProblems, setCompletedProblems] = useState<string[]>(() => {
     try {
       const item = localStorage.getItem("sc_completed_problems");
@@ -47,6 +110,7 @@ export default function App() {
       return [];
     }
   });
+
   const [user, setUser] = useState<User | null>(() => {
     try {
       const item = localStorage.getItem("sc_current_user");
@@ -55,6 +119,95 @@ export default function App() {
       return null;
     }
   });
+
+  const socket = useRef<WebSocket | null>(null);
+
+  function send(data: object) {
+    if (socket.current && socket.current.readyState === WebSocket.OPEN) {
+      socket.current.send(JSON.stringify(data));
+    }
+  }
+
+  const attention = useAttention((signal) => send({ type: "attention", ...signal }));
+
+  // Camera toggle handler
+  useEffect(() => {
+    if (cameraAllowed && !attention.enabled && !attention.error) {
+      void attention.start();
+    } else if (!cameraAllowed && attention.enabled) {
+      attention.stop();
+    }
+  }, [cameraAllowed, attention.enabled, attention.error, attention.start, attention.stop]);
+
+  // Sync active session in localStorage
+  useEffect(() => {
+    if (problem && sessionId) {
+      localStorage.setItem("sc_active_session", JSON.stringify({
+        view, language, problem, code, drafts, sessionId, messages, elapsed, cameraAllowed, returnView
+      }));
+      saveProblemDraft(problem.id, language, code, drafts, {
+        messages, elapsed
+      });
+    } else if (view === "library") {
+      localStorage.setItem("sc_active_session", JSON.stringify({
+        view: "library", language, drafts, cameraAllowed, returnView
+      }));
+    }
+  }, [view, language, problem, code, drafts, sessionId, messages, elapsed, cameraAllowed, returnView]);
+
+  // Re-connect WebSocket on reload if session exists
+  useEffect(() => {
+    if (sessionId && !socket.current) {
+      const ws = connectCoach(sessionId);
+      ws.onmessage = (event) => {
+        const incoming: CoachMessage = JSON.parse(event.data);
+        if (incoming.type === "report" && incoming.payload) {
+          setReport(incoming.payload);
+          if (incoming.payload.successful_runs > 0) {
+            setCompletedProblems((prev) => {
+              const currentProblemId = savedSession?.problem?.id || problem?.id;
+              if (!currentProblemId || prev.includes(currentProblemId)) return prev;
+              const next = [...prev, currentProblemId];
+              localStorage.setItem("sc_completed_problems", JSON.stringify(next));
+              return next;
+            });
+          }
+        } else {
+          setMessages((current) => [...current, incoming]);
+        }
+      };
+      socket.current = ws;
+    }
+  }, [sessionId]);
+
+  // Timer counter
+  useEffect(() => {
+    if (!sessionId) return;
+    const timer = window.setInterval(() => setElapsed((x: number) => x + 1), 1000);
+    return () => clearInterval(timer);
+  }, [sessionId]);
+
+  // Debounced code update sent to AI interviewer
+  useEffect(() => {
+    if (!sessionId) return;
+    const timer = window.setTimeout(
+      () => send({ type: "code_update", code, language }),
+      900
+    );
+    return () => clearTimeout(timer);
+  }, [code, language, sessionId]);
+
+  // Protected route redirects
+  useEffect(() => {
+    if (!user && view !== "home" && view !== "login" && view !== "signup" && view !== "dashboard/signin" && !view.startsWith("profile") && !view.startsWith("u/")) {
+      setReturnView(view);
+      setView("dashboard/signin");
+      if (problem) {
+        setProblem(null);
+        setSessionId("");
+      }
+    }
+  }, [user, view, problem]);
 
   function handleLoginSuccess(loggedInUser: User) {
     setUser(loggedInUser);
@@ -68,52 +221,21 @@ export default function App() {
           localStorage.setItem("sc_completed_problems", JSON.stringify(updatedUser.completed_problems));
         })
         .catch(() => {});
-    } else if (loggedInUser.completed_problems.length > 0) {
+    } else if (loggedInUser.completed_problems?.length > 0) {
       setCompletedProblems(loggedInUser.completed_problems);
       localStorage.setItem("sc_completed_problems", JSON.stringify(loggedInUser.completed_problems));
     }
-    setView(returnView === "login" ? "home" : returnView);
+    setView(returnView === "login" || returnView === "dashboard/signin" ? "home" : returnView);
   }
 
   function handleLogout() {
     setUser(null);
     localStorage.removeItem("sc_current_user");
-    if (view === "profile") {
-      setView("home");
-    }
+    localStorage.removeItem("sc_active_session");
+    setProblem(null);
+    setSessionId("");
+    setView("dashboard/signin");
   }
-
-  const renderNavActions = () => {
-    if (user) {
-      return (
-        <div className="nav-auth-actions">
-          <button
-            className="nav-user-badge"
-            onClick={() => { setReturnView(view); setView("profile"); }}
-          >
-            <span className="nav-user-avatar">{user.username.slice(0, 2)}</span>
-            <span>@{user.username}</span>
-          </button>
-          <button
-            className="btn-ghost"
-            style={{ padding: "6px 12px", fontSize: "13px" }}
-            onClick={handleLogout}
-          >
-            Log out
-          </button>
-        </div>
-      );
-    }
-    return (
-      <button
-        className="btn-ghost"
-        style={{ padding: "6px 14px", fontSize: "13px", borderColor: "var(--accent)", color: "var(--text)" }}
-        onClick={() => { setReturnView(view); setView("login"); }}
-      >
-        Log in / Sign up
-      </button>
-    );
-  };
 
   function markCompleted(id: string) {
     setCompletedProblems((prev) => {
@@ -132,54 +254,68 @@ export default function App() {
     });
   }
 
-  const socket = useRef<WebSocket | null>(null);
-  const coachMessagesEndRef = useRef<HTMLDivElement | null>(null);
+  // Start or resume interview session
+  async function begin(selectedProblem?: Problem) {
+    socket.current?.close();
+    setReturnView(view.startsWith("u/") || view === "profile" ? view : (selectedProblem ? "library" : "home"));
+    setView("home");
+    setReport(null);
 
-  const handleMouseDown = (type: "left" | "right" | "bottom") => (e: React.MouseEvent) => {
-    e.preventDefault();
-    setDragging(type);
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startLeft = leftWidth;
-    const startRight = rightWidth;
-    const startBottom = bottomHeight;
+    const created = await createSession(language, selectedProblem?.id);
+    const prob = created.problem;
+    setProblem(prob);
+    setSessionId(created.session_id);
 
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      if (type === "left") {
-        const next = Math.max(200, Math.min(window.innerWidth - rightWidth - 360, startLeft + (moveEvent.clientX - startX)));
-        setLeftWidth(next);
-        localStorage.setItem("sc_left_width", String(next));
-      } else if (type === "right") {
-        const next = Math.max(240, Math.min(window.innerWidth - leftWidth - 360, startRight - (moveEvent.clientX - startX)));
-        setRightWidth(next);
-        localStorage.setItem("sc_right_width", String(next));
-      } else if (type === "bottom") {
-        // Max: viewport - ws-header(52) - editor-toolbar(44) - resizer(5) - min editor area(100)
-        const maxBottom = window.innerHeight - 52 - 44 - 5 - 100;
-        const next = Math.max(80, Math.min(maxBottom, startBottom - (moveEvent.clientY - startY)));
-        setBottomHeight(next);
-        localStorage.setItem("sc_bottom_height", String(next));
+    // Retrieve any saved drafts for this problem
+    const savedDraftsForProblem = getProblemSavedData(prob.id);
+    const targetLang = savedDraftsForProblem?.language ?? language;
+
+    const starterDrafts: Partial<Record<Language, string>> = {
+      python: savedDraftsForProblem?.drafts?.python ?? prob.starter_code.python,
+      javascript: savedDraftsForProblem?.drafts?.javascript ?? prob.starter_code.javascript,
+      java: savedDraftsForProblem?.drafts?.java ?? prob.starter_code.java,
+      c: savedDraftsForProblem?.drafts?.c ?? prob.starter_code.c,
+      cpp: savedDraftsForProblem?.drafts?.cpp ?? prob.starter_code.cpp,
+    };
+
+    setLanguage(targetLang);
+    setDrafts(starterDrafts);
+    setCode(starterDrafts[targetLang] ?? prob.starter_code[targetLang] ?? "");
+    setMessages(savedDraftsForProblem?.messages || []);
+    setElapsed(savedDraftsForProblem?.elapsed || 0);
+
+    const ws = connectCoach(created.session_id);
+    ws.onmessage = (event) => {
+      const incoming: CoachMessage = JSON.parse(event.data);
+      if (incoming.type === "report" && incoming.payload) {
+        setReport(incoming.payload);
+        if (incoming.payload.successful_runs > 0) {
+          markCompleted(prob.id);
+        }
+      } else {
+        setMessages((current) => [...current, incoming]);
       }
     };
+    socket.current = ws;
+  }
 
-    const onMouseUp = () => {
-      setDragging(null);
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-  };
-
-  const send = (payload: object) => {
-    if (socket.current?.readyState === WebSocket.OPEN) {
-      socket.current.send(JSON.stringify(payload));
+  function leaveInterview() {
+    if (problem) {
+      saveProblemDraft(problem.id, language, code, drafts, {
+        messages,
+        elapsed,
+      });
     }
-  };
-  const attention = useAttention((signal) => send({ type: "attention", ...signal }));
-
-  const languageLabel = language === "python" ? "Python 3" : language === "java" ? "Java" : "JavaScript";
+    localStorage.removeItem("sc_active_session");
+    socket.current?.close();
+    socket.current = null;
+    attention.stop();
+    setCameraAllowed(false);
+    setProblem(null);
+    setSessionId("");
+    setReport(null);
+    setView(returnView);
+  }
 
   function switchLanguage(nextLanguage: Language) {
     if (nextLanguage === language) return;
@@ -189,956 +325,162 @@ export default function App() {
     };
     setDrafts(nextDrafts);
     setLanguage(nextLanguage);
-    setCode(nextDrafts[nextLanguage] ?? problem?.starter_code[nextLanguage] ?? "");
+    const savedForProblem = getProblemSavedData(problem?.id);
+    const nextCode = nextDrafts[nextLanguage] ?? savedForProblem?.drafts?.[nextLanguage] ?? problem?.starter_code[nextLanguage] ?? "";
+    setCode(nextCode);
+    if (problem) {
+      saveProblemDraft(problem.id, nextLanguage, nextCode, nextDrafts);
+    }
   }
 
-  useEffect(() => {
-    if (cameraAllowed && !attention.enabled && !attention.error) {
-      void attention.start();
-    } else if (!cameraAllowed && attention.enabled) {
-      attention.stop();
+  function handleResetCode() {
+    if (!problem) return;
+    if (window.confirm("Reset your code to the original starter code for this challenge?")) {
+      const starter = problem.starter_code[language] ?? "";
+      setCode(starter);
+      setDrafts((current) => {
+        const next = { ...current, [language]: starter };
+        saveProblemDraft(problem.id, language, starter, next);
+        return next;
+      });
     }
-  }, [
-    cameraAllowed,
-    attention.enabled,
-    attention.error,
-    attention.start,
-    attention.stop,
-  ]);
-
-  useEffect(() => {
-    if (problem && sessionId) {
-      localStorage.setItem("sc_active_session", JSON.stringify({
-        view, language, problem, code, drafts, sessionId, messages, output, runResult, elapsed, cameraAllowed, returnView
-      }));
-    } else if (view === "library") {
-      localStorage.setItem("sc_active_session", JSON.stringify({
-        view: "library", language, drafts, cameraAllowed, returnView
-      }));
-    } else if (!problem && view === "home") {
-      localStorage.removeItem("sc_active_session");
-    }
-  }, [view, language, problem, code, sessionId, messages, output, runResult, elapsed, cameraAllowed, returnView]);
-
-  useEffect(() => {
-    if (sessionId && !socket.current) {
-      const ws = connectCoach(sessionId);
-      ws.onmessage = (event) => {
-        const incoming: CoachMessage = JSON.parse(event.data);
-        if (incoming.type === "report" && incoming.payload) {
-          setReport(incoming.payload);
-          if (incoming.payload.successful_runs > 0) {
-            setCompletedProblems((prev) => {
-              const currentProblemId = savedSession?.problem?.id || problem?.id;
-              if (!currentProblemId || prev.includes(currentProblemId)) return prev;
-              const next = [...prev, currentProblemId];
-              localStorage.setItem("sc_completed_problems", JSON.stringify(next));
-              return next;
-            });
-          }
-        }
-        else setMessages((current) => [...current, incoming]);
-      };
-      socket.current = ws;
-    }
-  }, [sessionId]);
-
-  useEffect(() => {
-    coachMessagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages]);
-
-  useEffect(() => {
-    if (!sessionId) return;
-    const timer = window.setInterval(() => setElapsed((x: number) => x + 1), 1000);
-    return () => clearInterval(timer);
-  }, [sessionId]);
-
-  useEffect(() => {
-    if (!sessionId) return;
-    const timer = window.setTimeout(
-      () => send({ type: "code_update", code, language }),
-      900
-    );
-    return () => clearTimeout(timer);
-  }, [code, language, sessionId]);
-
-  async function begin(selectedProblem?: Problem) {
-    socket.current?.close();
-    setReturnView(selectedProblem ? "library" : "home");
-    const created = await createSession(language, selectedProblem?.id);
-    setProblem(created.problem);
-    setSessionId(created.session_id);
-    const starterDrafts = {
-      python: created.problem.starter_code.python,
-      javascript: created.problem.starter_code.javascript,
-      java: created.problem.starter_code.java,
-    };
-    setDrafts(starterDrafts);
-    setCode(starterDrafts[language] ?? "");
-    setMessages([]);
-    setReport(null);
-    setElapsed(0);
-    setRunResult(null);
-    setChatInput("");
-    const ws = connectCoach(created.session_id);
-    ws.onmessage = (event) => {
-      const incoming: CoachMessage = JSON.parse(event.data);
-      if (incoming.type === "report" && incoming.payload) {
-        setReport(incoming.payload);
-        if (incoming.payload.successful_runs > 0) {
-          setCompletedProblems((prev) => {
-            if (prev.includes(created.problem.id)) return prev;
-            const next = [...prev, created.problem.id];
-            localStorage.setItem("sc_completed_problems", JSON.stringify(next));
-            return next;
-          });
-        }
-      }
-      else setMessages((current) => [...current, incoming]);
-    };
-    socket.current = ws;
   }
 
-  function leaveInterview() {
-    localStorage.removeItem("sc_active_session");
-    socket.current?.close();
-    socket.current = null;
-    attention.stop();
-    setCameraAllowed(false);
-    setProblem(null);
-    setSessionId("");
-    setCode("");
-    setDrafts({});
-    setMessages([]);
-    setReport(null);
-    setOutput("Run your code when you're ready.");
-    setRunResult(null);
-    setChatInput("");
-    setElapsed(0);
-    setView(returnView);
+  function handleSendMessage(msgText: string) {
+    if (!msgText.trim()) return;
+    setMessages((current) => [...current, { type: "user", level: "user", message: msgText }]);
+    send({ type: "user_message", message: msgText, code, language });
   }
 
-  async function execute() {
-    if (problem && code.trim() === problem.starter_code[language].trim()) {
-      setOutput("Write some solution code before running.");
-      setRunResult({ output: "Write some solution code before running.", passed: false });
-      return;
-    }
-    setOutput("Running code and test cases...");
-    setRunResult({ output: "Running code and test cases...", passed: null });
-    const result = await runCode(language, code, problem?.id, problem?.test_cases || problem?.examples);
-    setOutput(result.output);
-    setRunResult(result);
+  function handleAskHint() {
+    const hintMsg = "Can you give me a subtle hint on the approach?";
+    setMessages((current) => [...current, { type: "user", level: "hint", message: hintMsg }]);
+    send({ type: "hint_request", code, language });
+  }
+
+  function handleRunSuccess(result: CodeRunResult) {
     const passed = result.passed ?? !(/error|disabled/i.test(result.output) || result.exit_code !== 0);
     send({ type: "run_result", code, language, passed, output: result.output });
   }
 
   function submitSolution() {
-    if (!problem || !runResult?.passed) return;
+    if (!problem) return;
     markCompleted(problem.id);
-    setMessages((current) => {
-      if (current.some((m) => m.message.includes("marked as solved"))) {
-        return current;
-      }
-      return [
-        ...current,
-        { type: "coach", level: "celebrate", message: "🎉 Solution submitted and accepted! Problem marked as solved in your library." }
-      ];
-    });
+    send({ type: "complete" });
   }
 
-  function handleSendMessage(e: React.FormEvent) {
-    e.preventDefault();
-    if (!chatInput.trim()) return;
-    const msg = chatInput.trim();
-    setMessages((current) => [...current, { type: "user", level: "user", message: msg }]);
-    send({ type: "user_message", message: msg, code, language });
-    setChatInput("");
-  }
+  // --- Router Rendering ---
 
-  const mins = String(Math.floor(elapsed / 60)).padStart(2, "0");
-  const secs = String(elapsed % 60).padStart(2, "0");
-
-  if (!problem) {
-    if (view === "login") {
-      return (
-        <>
-          <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
-          <Login
-            onLogin={handleLoginSuccess}
-            onBack={() => setView(returnView === "login" ? "home" : returnView)}
-          />
-        </>
-      );
-    }
-    if (view === "profile") {
-      if (!user) {
-        return (
-          <>
-            <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
-            <Login
-              onLogin={handleLoginSuccess}
-              onBack={() => setView("home")}
-            />
-          </>
-        );
-      }
-      return (
-        <>
-          <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
-          <Profile
-            username={user.username}
-            onBack={() => setView(returnView === "profile" ? "home" : returnView)}
-            onSelectProblem={begin}
-            onBrowse={() => setView("library")}
-          />
-        </>
-      );
-    }
-    if (view === "library") {
-      return (
-        <>
-          <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
-          <ProblemLibrary
-            language={language}
-            onLanguage={setLanguage}
-            onBack={() => setView("home")}
-            onPractice={begin}
-            completedProblems={completedProblems}
-            navActions={renderNavActions()}
-          />
-        </>
-      );
-    }
+  if (view === "login" || view === "dashboard/signin") {
     return (
-      <main className="landing">
-        <video ref={attention.videoRef} muted playsInline style={{ display: "none" }} />
-        <nav className="site-nav">
-          <div className="brand">
-            <span className="brand-dot" />
-            SignalCode
-          </div>
-          <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-            <button className="btn-ghost" onClick={() => setView("library")}>Browse problems</button>
-            {renderNavActions()}
-          </div>
-        </nav>
-
-        <div className="hero-section">
-          <div className="hero-pill">
-            <span className="hero-pill-dot" />
-            AI-Powered Interview Sandbox
-          </div>
-          <h1 className="hero-title">Practice smarter.<br /><em>Ship faster.</em></h1>
-          <p className="hero-subtitle">
-            A private AI coach that watches your process—not your personality—and delivers the smallest useful hint at exactly the right moment.
-          </p>
-          <div className="hero-actions">
-            <select
-              className="form-select"
-              style={{ width: "auto" }}
-              value={language}
-              onChange={(e) => switchLanguage(e.target.value as Language)}
-            >
-              <option value="python">Python</option>
-              <option value="javascript">JavaScript</option>
-              <option value="java">Java</option>
-            </select>
-            <button className="btn-primary" onClick={() => setView("library")}>
-              Browse Problems →
-            </button>
-          </div>
-          <p className="hero-meta desktop-only">
-            <label>
-              <input
-                type="checkbox"
-                checked={cameraAllowed}
-                onChange={(event) => setCameraAllowed(event.target.checked)}
-              />
-              Enable on-device focus tracking (camera stays local)
-            </label>
-          </p>
-        </div>
-
-        <div className="stats-strip">
-          <div className="stat-item">
-            <span className="stat-num">18+</span>
-            <span className="stat-label">Classic Problems</span>
-          </div>
-          <div className="stat-item">
-            <span className="stat-num">&lt;10ms</span>
-            <span className="stat-label">Code Execution</span>
-          </div>
-          <div className="stat-item">
-            <span className="stat-num">100%</span>
-            <span className="stat-label">Local & Private</span>
-          </div>
-        </div>
-
-        <div className="features-grid">
-          <div className="feature-card">
-            <div className="feature-icon">🧠</div>
-            <h3>Adaptive Hint Engine</h3>
-            <p>Analyzes your approach in real-time and nudges you without giving away the solution.</p>
-          </div>
-          <div className="feature-card">
-            <div className="feature-icon">👁️</div>
-            <h3>On-Device Focus Signal</h3>
-            <p>MediaPipe AI tracks your focus locally—no video leaves your browser.</p>
-          </div>
-          <div className="feature-card">
-            <div className="feature-icon">⚡</div>
-            <h3>Instant Test Sandbox</h3>
-            <p>Run Python, JavaScript, or Java code with automated test case validation in milliseconds.</p>
-          </div>
-          <div className="feature-card">
-            <div className="feature-icon">📈</div>
-            <h3>Session Reports</h3>
-            <p>Post-session breakdown of runs, hints used, focus metrics, and complexity analysis.</p>
-          </div>
-        </div>
-      </main>
+      <LoginScreen
+        onLoginSuccess={handleLoginSuccess}
+        onNavigate={(v) => setView(v)}
+      />
     );
   }
 
-  return (
-    <main className="workspace">
-      {dragging && (
-        <div
-          style={{
-            position: "fixed", inset: 0, zIndex: 9999,
-            cursor: dragging === "bottom" ? "row-resize" : "col-resize",
-            userSelect: "none",
-          }}
+  if (view === "signup") {
+    return (
+      <SignupScreen
+        onSignupSuccess={handleLoginSuccess}
+        onNavigate={(v) => setView(v)}
+      />
+    );
+  }
+
+  if (view.startsWith("u/") || view === "profile") {
+    const rawUser = view.startsWith("u/") ? view.slice(2) : user?.username;
+    const targetUser = rawUser ? decodeURIComponent(rawUser).trim().replace(/^@+/, "") : "";
+    if (!targetUser) {
+      return (
+        <LoginScreen
+          onLoginSuccess={handleLoginSuccess}
+          onNavigate={(v) => setView(v)}
         />
-      )}
-      <header className="ws-header">
-        <div className="ws-header-left">
-          <button className="btn-ghost" style={{ padding: "6px 12px", fontSize: "13px" }} onClick={leaveInterview}>
-            ← Back
-          </button>
-          <div className="ws-brand">
-            <span className="brand-dot" />
-            SignalCode
-          </div>
-        </div>
-        <div className="ws-header-right">
-          {renderNavActions()}
-          <div className="session-timer">
-            <span className="live-dot" />
-            <span>{mins}:{secs}</span>
-          </div>
-          <button
-            className={`btn-icon${attention.enabled ? " active" : ""} desktop-only`}
-            title={attention.error || "Toggle camera focus tracking"}
-            onClick={() => setCameraAllowed((prev) => !prev)}
-          >
-            {attention.enabled ? "● Cam On" : "○ Cam Off"}
-          </button>
-          <button className="btn-ghost" style={{ fontSize: "13px" }} onClick={() => send({ type: "complete" })}>
-            End session
-          </button>
-        </div>
-      </header>
+      );
+    }
+    return (
+      <ProfileScreen
+        user={user}
+        targetUsername={targetUser}
+        onSelectProblem={begin}
+        onNavigate={(v) => setView(v)}
+        onLogout={handleLogout}
+      />
+    );
+  }
 
-      <div className="mobile-ws-tabs">
-        <button
-          className={`mobile-ws-tab ${mobileTab === "problem" ? "active" : ""}`}
-          onClick={() => setMobileTab("problem")}
-        >
-          📄 Description
-        </button>
-        <button
-          className={`mobile-ws-tab ${mobileTab === "editor" ? "active" : ""}`}
-          onClick={() => setMobileTab("editor")}
-        >
-          💻 Code & Test
-        </button>
-        <button
-          className={`mobile-ws-tab ${mobileTab === "coach" ? "active" : ""}`}
-          onClick={() => setMobileTab("coach")}
-        >
-          🤖 AI Coach {messages.length > 0 && <span className="mobile-badge">{messages.length}</span>}
-        </button>
-      </div>
+  if (view === "library") {
+    return (
+      <CatalogScreen
+        user={user}
+        completedProblems={completedProblems}
+        onSelectProblem={begin}
+        onNavigate={(v) => setView(v)}
+        onLogout={handleLogout}
+      />
+    );
+  }
 
-      <div
-        className="ws-grid"
-        style={{
-          gridTemplateColumns: `${leftWidth}px 5px minmax(340px,1fr) 5px ${rightWidth}px`,
-          flex: 1,
-          minHeight: 0,
+  // Home View: If report active -> show ReportScreen
+  if (report && problem) {
+    return (
+      <ReportScreen
+        user={user}
+        report={report}
+        problem={problem}
+        finalCode={code}
+        messages={messages}
+        onNavigate={(v) => setView(v)}
+        onPracticeAgain={() => begin(problem)}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  // Home View: If problem active -> show InterviewScreen
+  if (problem) {
+    return (
+      <InterviewScreen
+        user={user}
+        problem={problem}
+        language={language}
+        code={code}
+        drafts={drafts}
+        sessionId={sessionId}
+        messages={messages}
+        elapsed={elapsed}
+        attention={attention}
+        cameraAllowed={cameraAllowed}
+        onCodeChange={(nextCode) => {
+          setCode(nextCode);
+          setDrafts((current) => {
+            const next = { ...current, [language]: nextCode };
+            if (problem) saveProblemDraft(problem.id, language, nextCode, next);
+            return next;
+          });
         }}
-      >
-        <aside className={`panel-problem ${mobileTab !== "problem" ? "mobile-hidden" : ""}`}>
-          <div className="prob-meta">
-            <span className={`diff-badge diff-${problem.difficulty}`}>{problem.difficulty}</span>
-            {problem.topics.slice(0, 4).map((t, i) => (
-              <span key={i} className="tag-chip">{t}</span>
-            ))}
-          </div>
-          <h2 className="prob-title">
-            {problem.title}
-            {completedProblems.includes(problem.id) && (
-              <span className="completed-badge" title="Completed">✓ Solved</span>
-            )}
-          </h2>
-          <div className="prob-desc">{problem.description}</div>
-
-          {(!problem.description.toLowerCase().includes("example 1:") &&
-            !problem.description.toLowerCase().includes("input:") &&
-            problem.examples?.length > 0) && (
-            <div className="prob-examples">
-              <h3>Examples</h3>
-              {problem.examples.map((ex, i) => (
-                <div key={i} className="prob-example-block">
-                  <div><strong>Input:</strong> {ex.input}</div>
-                  <div><strong>Output:</strong> {ex.output}</div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="camera-section desktop-only">
-            <h3>Focus Tracking</h3>
-            <video
-              ref={attention.videoRef}
-              muted playsInline
-              className="camera-video"
-              style={{ display: cameraAllowed ? "block" : "none" }}
-            />
-            {cameraAllowed ? (
-              <>
-                <div className="focus-bar">
-                  <span className="focus-bar-label">Focus signal</span>
-                  <span className="focus-bar-score">{attention.score}</span>
-                </div>
-                {attention.error && (
-                  <small style={{ color: "var(--red)", fontSize: "12px", display: "block", marginBottom: "8px" }}>
-                    {attention.error}
-                  </small>
-                )}
-                <button className="btn-ghost" style={{ width: "100%", justifyContent: "center", fontSize: "12px" }} onClick={() => setCameraAllowed(false)}>
-                  Disable camera
-                </button>
-              </>
-            ) : (
-              <>
-                <p style={{ fontSize: "12px", color: "var(--text-3)", marginBottom: "10px" }}>
-                  On-device only · no video leaves your browser
-                </p>
-                {attention.error && (
-                  <small style={{ color: "var(--red)", fontSize: "12px", display: "block", marginBottom: "8px" }}>
-                    {attention.error}
-                  </small>
-                )}
-                <button className="btn-ghost" style={{ width: "100%", justifyContent: "center", fontSize: "12px" }} onClick={() => setCameraAllowed(true)}>
-                  Enable focus camera
-                </button>
-              </>
-            )}
-          </div>
-        </aside>
-
-        <div className={`resizer resizer-col${dragging === "left" ? " dragging" : ""}`} onMouseDown={handleMouseDown("left")} />
-
-        <section className={`panel-editor ${mobileTab !== "editor" ? "mobile-hidden" : ""}`}>
-          <div className="editor-toolbar">
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span className="label desktop-only" style={{ fontSize: "12px" }}>{languageLabel}</span>
-              <select
-                className="form-select"
-                style={{ width: "auto", minWidth: "120px" }}
-                value={language}
-                onChange={(event) => switchLanguage(event.target.value as Language)}
-              >
-                <option value="python">Python</option>
-                <option value="javascript">JavaScript</option>
-                <option value="java">Java</option>
-              </select>
-            </div>
-            <div style={{ display: "flex", gap: "8px" }}>
-              <button className="run-btn" onClick={execute}>▶ Run Code</button>
-              {runResult?.passed && (
-                <button className="submit-btn" onClick={submitSolution}>✓ Submit</button>
-              )}
-            </div>
-          </div>
-          <div style={{ flex: 1, position: "relative", minHeight: 0, overflow: "hidden" }}>
-            <Editor
-              height="100%"
-              theme="vs-dark"
-              language={language}
-              value={code}
-              onChange={(value) => {
-                const nextCode = value || "";
-                setCode(nextCode);
-                setDrafts((current) => ({ ...current, [language]: nextCode }));
-                if (runResult) setRunResult(null);
-              }}
-              options={{ fontSize: 14, minimap: { enabled: false }, padding: { top: 16 }, automaticLayout: true, lineNumbersMinChars: 3, scrollBeyondLastLine: false }}
-            />
-          </div>
-          <div className={`resizer resizer-row${dragging === "bottom" ? " dragging" : ""}`} onMouseDown={handleMouseDown("bottom")} />
-          <div
-            className="panel-output"
-            tabIndex={0}
-            onMouseEnter={(e) => {
-              e.currentTarget.focus({ preventScroll: true });
-            }}
-            onWheel={(e) => {
-              e.stopPropagation();
-            }}
-            style={{
-              height: `${bottomHeight}px`,
-              maxHeight: "calc(100% - 100px)",
-              overflowY: "auto",
-            }}
-          >
-            {runResult?.test_results ? (
-              <div className="test-results">
-                <div className="test-results-header">
-                  <span className="label">Test Results</span>
-                  <span className={`result-badge ${runResult.passed ? "passed" : "failed"}`}>
-                    {runResult.passed ? "✓ All Passed" : "✗ Some Failed"}
-                  </span>
-                </div>
-                {runResult.test_results.map((tc, idx) => (
-                  <div key={idx} className={`tc-row ${tc.passed ? "tc-pass" : "tc-fail"}`}>
-                    <div className="tc-row-header">
-                      <strong>{tc.name}</strong>
-                      <span style={{ color: tc.passed ? "var(--green)" : "var(--red)" }}>{tc.passed ? "✓" : "✗"}</span>
-                    </div>
-                    <div className="tc-row-body">
-                      <div><span className="key">Input</span><code>{tc.input}</code></div>
-                      <div><span className="key">Expected</span><code>{tc.expected}</code></div>
-                      <div><span className="key">Actual</span><code>{tc.actual}</code></div>
-                      {tc.error && <div className="tc-err">{tc.error}</div>}
-                    </div>
-                  </div>
-                ))}
-                {runResult.output &&
-                  runResult.output !== "Code ran successfully with no output." &&
-                  runResult.output !== "Code ran successfully with no console output." && (
-                    <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: "1px solid var(--border)" }}>
-                      <span className="label">Console</span>
-                      <pre style={{ marginTop: "6px", color: "var(--text-2)" }}>{runResult.output}</pre>
-                    </div>
-                  )}
-              </div>
-            ) : (
-              <div className="output-content"><pre>{runResult?.output || output}</pre></div>
-            )}
-          </div>
-        </section>
-
-        <div className={`resizer resizer-col${dragging === "right" ? " dragging" : ""}`} onMouseDown={handleMouseDown("right")} />
-
-        <aside className={`panel-coach ${mobileTab !== "coach" ? "mobile-hidden" : ""}`}>
-          <div className="coach-header">
-            <div className="coach-avatar">S</div>
-            <div className="coach-meta">
-              <div className="coach-name">SignalCode Coach</div>
-              <div className="coach-status">Watching your process</div>
-            </div>
-          </div>
-          <div className="coach-messages">
-            {messages.length === 0 && <p className="empty-coach">I'll stay quiet until a nudge is useful.</p>}
-            {messages.map((m, index) => (
-              <div className={`msg msg-${m.level}`} key={index}>
-                {m.level === "user"
-                  ? <div className="msg-from">You</div>
-                  : m.level !== "info" && <div className="msg-from">Coach</div>}
-                {m.message}
-              </div>
-            ))}
-            <div ref={coachMessagesEndRef} />
-          </div>
-          <div className="coach-footer">
-            <form className="chat-input-row" onSubmit={handleSendMessage}>
-              <input
-                className="chat-input"
-                type="text"
-                placeholder="Ask about complexity, approach..."
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-              />
-              <button className="chat-send" type="submit" disabled={!chatInput.trim()}>Send</button>
-            </form>
-            <button className="hint-btn" onClick={() => send({ type: "hint_request", code, language })}>
-              💡 Give me a hint
-            </button>
-          </div>
-        </aside>
-      </div>
-
-      {report && (
-        <div className="modal-overlay">
-          <div className="modal-box report-box">
-            <div className="modal-head">
-              <div>
-                <span className="label">Session Complete</span>
-                <h2 style={{ marginTop: "6px" }}>Your practice, in signals.</h2>
-              </div>
-            </div>
-            <div className="report-stats">
-              <div className="report-stat">
-                <strong>{Math.round(report.duration_seconds / 60)}<span style={{ fontSize: "18px" }}>m</span></strong>
-                <span>Time spent</span>
-              </div>
-              <div className="report-stat">
-                <strong>{report.runs}</strong>
-                <span>Code runs</span>
-              </div>
-              <div className="report-stat">
-                <strong>{report.hints_used}</strong>
-                <span>Hints used</span>
-              </div>
-              <div className="report-stat">
-                <strong>{report.average_focus ?? "—"}</strong>
-                <span>Avg focus</span>
-              </div>
-            </div>
-            <p className="report-summary">{report.summary}</p>
-            <button className="btn-primary" onClick={leaveInterview}>Practice another →</button>
-          </div>
-        </div>
-      )}
-    </main>
-  );
-}
-
-function ProblemLibrary({
-  language,
-  onLanguage,
-  onBack,
-  onPractice,
-  completedProblems,
-  navActions,
-}: {
-  language: Language;
-  onLanguage: (language: Language) => void;
-  onBack: () => void;
-  onPractice: (problem: Problem) => void;
-  completedProblems: string[];
-  navActions?: React.ReactNode;
-}) {
-  const [problems, setProblems] = useState<Problem[]>([]);
-  const [query, setQuery] = useState("");
-  const [tag, setTag] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [creating, setCreating] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importSlug, setImportSlug] = useState("");
-  const [importLoading, setImportLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    getProblems().then(setProblems).catch((reason) => setError(reason.message));
-  }, []);
-
-  const tags = [...new Set(problems.flatMap((item) => item.topics))].sort();
-  const visible = problems.filter((item) => {
-    const text = `${item.title} ${item.description} ${item.topics.join(" ")}`.toLowerCase();
-    const matchesQuery = text.includes(query.toLowerCase());
-    const matchesTag = tag === "all" || item.topics.includes(tag);
-    const isSolved = completedProblems.includes(item.id);
-    const matchesStatus =
-      statusFilter === "all" ||
-      (statusFilter === "solved" && isSolved) ||
-      (statusFilter === "unsolved" && !isSolved);
-    return matchesQuery && matchesTag && matchesStatus;
-  });
-  const leetcodeProblems = visible.filter((item) => item.source.toLowerCase() === "leetcode");
-  const customProblems = visible.filter((item) => item.source.toLowerCase() !== "leetcode");
-
-  async function create(form: HTMLFormElement) {
-    const data = new FormData(form);
-    const title = String(data.get("title") || "");
-    const description = String(data.get("description") || "");
-    const topics = String(data.get("topics") || "")
-      .split(",").map((topic) => topic.trim().toLowerCase()).filter(Boolean);
-    const exampleInput = String(data.get("exampleInput") || "");
-    const exampleOutput = String(data.get("exampleOutput") || "");
-    try {
-      const added = await addProblem({
-        title,
-        description,
-        topics,
-        difficulty: String(data.get("difficulty")) as Problem["difficulty"],
-        examples: exampleInput || exampleOutput
-          ? [{ input: exampleInput, output: exampleOutput }]
-          : [],
-        starter_code: {
-          python: "# Write your solution here\n",
-          javascript: "// Write your solution here\n",
-          java: "// Write your solution here\n",
-        },
-      });
-      setProblems((current) => [added, ...current]);
-      setCreating(false);
-      setError("");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not save the problem");
-    }
+        onLanguageChange={switchLanguage}
+        onResetCode={handleResetCode}
+        onSendMessage={handleSendMessage}
+        onAskHint={handleAskHint}
+        onRunSuccess={handleRunSuccess}
+        onSubmitSolution={submitSolution}
+        onLeaveInterview={leaveInterview}
+        onToggleCamera={() => setCameraAllowed((prev) => !prev)}
+        onNavigateProfile={() => setView(`u/${user?.username || ""}`)}
+      />
+    );
   }
 
-  async function handleImport(e: React.FormEvent) {
-    e.preventDefault();
-    if (!importSlug.trim()) return;
-    setImportLoading(true);
-    setError("");
-    try {
-      const added = await importProblem(importSlug.trim());
-      setProblems((current) => [added, ...current.filter((p) => p.id !== added.id)]);
-      setImporting(false);
-      setImportSlug("");
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not import problem from LeetCode");
-    } finally {
-      setImportLoading(false);
-    }
-  }
-
+  // Otherwise: Landing Page
   return (
-    <main className="library-page">
-      <nav className="lib-header">
-        <button
-          onClick={onBack}
-          style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px" }}
-        >
-          <div className="brand">
-            <span className="brand-dot" />
-            SignalCode
-          </div>
-        </button>
-        <div className="lib-header-actions">
-          <button className="btn-ghost" onClick={() => { setImporting(true); setCreating(false); setError(""); }}>
-            <span className="import-long">↓ Import from LeetCode</span>
-            <span className="import-short">↓ Import</span>
-          </button>
-          <button className="btn-primary" onClick={() => { setCreating(true); setImporting(false); setError(""); }}>
-            + Add problem
-          </button>
-          {navActions}
-        </div>
-      </nav>
-
-      <div className="lib-body">
-        <div className="lib-title-row">
-          <div>
-            <h1 className="lib-title">Problem Library</h1>
-            <p style={{ color: "var(--text-3)", fontSize: "14px", marginTop: "6px" }}>
-              Browse, search, and practice classic algorithm problems
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-            <select
-              className="form-select"
-              style={{ width: "auto" }}
-              value={language}
-              onChange={(event) => onLanguage(event.target.value as Language)}
-            >
-              <option value="python">Python</option>
-              <option value="javascript">JavaScript</option>
-              <option value="java">Java</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="lib-filters">
-          <input
-            className="lib-search"
-            aria-label="Search problems"
-            placeholder="Search problems by title or topic…"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          <select
-            className="form-select"
-            style={{ width: "auto", minWidth: "140px" }}
-            value={tag}
-            onChange={(event) => setTag(event.target.value)}
-          >
-            <option value="all">All topics</option>
-            {tags.map((item) => <option key={item}>{item}</option>)}
-          </select>
-          <select
-            className="form-select"
-            style={{ width: "auto", minWidth: "140px" }}
-            value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
-          >
-            <option value="all">All statuses</option>
-            <option value="solved">Solved ✓</option>
-            <option value="unsolved">Unsolved</option>
-          </select>
-        </div>
-
-        {error && <p className="form-error" style={{ marginBottom: "16px" }}>{error}</p>}
-
-        <div className="prob-table">
-          {!!leetcodeProblems.length && (
-            <div className="prob-section">
-              <div className="prob-section-label">LeetCode problems</div>
-              {leetcodeProblems.map((item, n) => (
-                <div className="prob-row" key={item.id} onClick={() => onPractice(item)}>
-                  <div className="prob-row-left">
-                    <span className="prob-num">{String(n + 1).padStart(2, "0")}</span>
-                    <div className="prob-info">
-                      <div className="prob-name">
-                        {item.title}
-                        {completedProblems.includes(item.id) && (
-                          <span className="completed-badge" title="Completed">✓ Solved</span>
-                        )}
-                      </div>
-                      <div className="prob-tags">
-                        {item.topics.slice(0, 4).map((t, i) => (
-                          <span key={i} className="tag-chip">{t}</span>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="prob-row-right">
-                    <span className={`diff-badge diff-${item.difficulty}`}>{item.difficulty}</span>
-                    <button
-                      className="btn-primary"
-                      style={{ padding: "7px 14px", fontSize: "13px" }}
-                      onClick={(e) => { e.stopPropagation(); onPractice(item); }}
-                    >
-                      Practice
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          {!!leetcodeProblems.length && !!customProblems.length && <div className="prob-divider" />}
-          {!!customProblems.length && (
-            <div className="prob-section">
-              <div className="prob-section-label">Custom problems</div>
-              {customProblems.map((item, n) => (
-                <div className="prob-row" key={item.id} onClick={() => onPractice(item)}>
-                  <div className="prob-row-left">
-                    <span className="prob-num">{String(n + 1).padStart(2, "0")}</span>
-                    <div className="prob-info">
-                      <div className="prob-name">
-                        {item.title}
-                        {completedProblems.includes(item.id) && (
-                          <span className="completed-badge" title="Completed">✓ Solved</span>
-                        )}
-                      </div>
-                      <div className="prob-tags">
-                        {item.topics.slice(0, 4).map((t, i) => (
-                          <span key={i} className="tag-chip">{t}</span>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="prob-row-right">
-                    <span className={`diff-badge diff-${item.difficulty}`}>{item.difficulty}</span>
-                    <button
-                      className="btn-primary"
-                      style={{ padding: "7px 14px", fontSize: "13px" }}
-                      onClick={(e) => { e.stopPropagation(); onPractice(item); }}
-                    >
-                      Practice
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          {!visible.length && <div className="empty-state">No problems match your search.</div>}
-        </div>
-      </div>
-
-      {creating && (
-        <div className="modal-overlay">
-          <div className="modal-box">
-            <div className="modal-head">
-              <div>
-                <span className="label">Custom Problem</span>
-                <h2 style={{ marginTop: "6px" }}>Add a problem</h2>
-              </div>
-              <button className="btn-ghost" style={{ fontSize: "13px" }} onClick={() => setCreating(false)}>✕ Close</button>
-            </div>
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void create(event.currentTarget);
-              }}
-            >
-              <div className="form-group">
-                <label className="form-label">Title</label>
-                <input className="form-input" name="title" minLength={3} required placeholder="e.g. Two Sum" />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Description</label>
-                <textarea className="form-textarea" name="description" rows={6} minLength={10} required placeholder="Problem description..." />
-              </div>
-              <div className="form-row">
-                <div className="form-group">
-                  <label className="form-label">Difficulty</label>
-                  <select className="form-select" name="difficulty">
-                    <option>easy</option><option>medium</option><option>hard</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Tags (comma-separated)</label>
-                  <input className="form-input" name="topics" placeholder="arrays, hash-map" />
-                </div>
-              </div>
-              <div className="form-row">
-                <div className="form-group">
-                  <label className="form-label">Example Input</label>
-                  <textarea className="form-textarea" name="exampleInput" rows={3} />
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Expected Output</label>
-                  <textarea className="form-textarea" name="exampleOutput" rows={3} />
-                </div>
-              </div>
-              <button className="btn-primary" type="submit">Save problem</button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {importing && (
-        <div className="modal-overlay">
-          <div className="modal-box" style={{ maxWidth: "480px" }}>
-            <div className="modal-head">
-              <div>
-                <span className="label">Import</span>
-                <h2 style={{ marginTop: "6px" }}>Import from LeetCode</h2>
-              </div>
-              <button className="btn-ghost" style={{ fontSize: "13px" }} onClick={() => setImporting(false)}>✕</button>
-            </div>
-            <p style={{ fontSize: "13px", color: "var(--text-2)", lineHeight: 1.6, marginBottom: "20px" }}>
-              Enter a problem slug (e.g. <code style={{ fontFamily: "JetBrains Mono", color: "var(--accent-2)" }}>two-sum</code>), a full LeetCode URL, or type <code style={{ fontFamily: "JetBrains Mono", color: "var(--accent-2)" }}>daily</code> to fetch today's challenge.
-            </p>
-            {error && <p className="form-error">{error}</p>}
-            <form onSubmit={handleImport}>
-              <div className="form-group">
-                <label className="form-label">Problem slug or URL</label>
-                <input
-                  className="form-input"
-                  type="text"
-                  placeholder="e.g. two-sum"
-                  value={importSlug}
-                  onChange={(e) => setImportSlug(e.target.value)}
-                  disabled={importLoading}
-                  required
-                />
-              </div>
-              <button className="btn-primary" type="submit" disabled={importLoading || !importSlug.trim()}>
-                {importLoading ? "Fetching…" : "↓ Import Problem"}
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-    </main>
+    <LandingScreen
+      user={user}
+      onNavigate={(v) => setView(v)}
+      onStartInterview={() => begin()}
+      onLogout={handleLogout}
+    />
   );
 }

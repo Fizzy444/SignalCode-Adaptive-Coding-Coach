@@ -42,7 +42,7 @@ def initialize() -> None:
                 starter_code TEXT NOT NULL, created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY, password TEXT NOT NULL, created_at TEXT NOT NULL
+                username TEXT PRIMARY KEY, password TEXT NOT NULL, email TEXT NOT NULL, created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS user_completed_problems (
                 username TEXT NOT NULL, problem_id TEXT NOT NULL, completed_at TEXT NOT NULL,
@@ -150,51 +150,91 @@ def load_custom_problems() -> list[dict]:
 
 
 def get_user_by_username(username: str) -> dict | None:
+    clean = username.strip().lstrip("@")
     with connection() as db:
-        row = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        row = db.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (clean,)).fetchone()
     return dict(row) if row else None
 
 
-def create_user(username: str, password_hash: str) -> dict:
+def search_users(query: str = "", limit: int = 10) -> list[dict]:
+    clean = query.strip().lstrip("@")
+    with connection() as db:
+        if clean:
+            rows = db.execute(
+                """
+                SELECT u.username, u.created_at, COUNT(c.problem_id) as total_completed
+                FROM users u
+                LEFT JOIN user_completed_problems c ON u.username = c.username COLLATE NOCASE
+                WHERE u.username LIKE ? COLLATE NOCASE
+                GROUP BY u.username
+                ORDER BY total_completed DESC, u.username ASC
+                LIMIT ?
+                """,
+                (f"%{clean}%", limit),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                """
+                SELECT u.username, u.created_at, COUNT(c.problem_id) as total_completed
+                FROM users u
+                LEFT JOIN user_completed_problems c ON u.username = c.username COLLATE NOCASE
+                GROUP BY u.username
+                ORDER BY total_completed DESC, u.username ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def create_user(username: str, password_hash: str, email: str) -> dict:
     created_time = now()
     with connection() as db:
         db.execute(
-            "INSERT INTO users (username, password, created_at) VALUES (?, ?, ?)",
-            (username, password_hash, created_time),
+            "INSERT INTO users (username, password, email, created_at) VALUES (?, ?, ?, ?)",
+            (username, password_hash, email, created_time),
         )
-    return {"username": username, "password": password_hash, "created_at": created_time}
+    return {"username": username, "password": password_hash, "email": email, "created_at": created_time}
 
 
 def add_user_completed_problem(username: str, problem_id: str) -> None:
+    clean = username.strip().lstrip("@")
     with connection() as db:
+        # Get the canonical casing for the username
+        row = db.execute("SELECT username FROM users WHERE username = ? COLLATE NOCASE", (clean,)).fetchone()
+        canonical_username = row["username"] if row else clean
         db.execute(
             """
             INSERT OR IGNORE INTO user_completed_problems (username, problem_id, completed_at)
             VALUES (?, ?, ?)
             """,
-            (username, problem_id, now()),
+            (canonical_username, problem_id, now()),
         )
 
 
 def sync_user_completed_problems(username: str, problem_ids: list[str]) -> None:
     if not problem_ids:
         return
+    clean = username.strip().lstrip("@")
     time_str = now()
     with connection() as db:
+        row = db.execute("SELECT username FROM users WHERE username = ? COLLATE NOCASE", (clean,)).fetchone()
+        canonical_username = row["username"] if row else clean
         for pid in problem_ids:
             db.execute(
                 """
                 INSERT OR IGNORE INTO user_completed_problems (username, problem_id, completed_at)
                 VALUES (?, ?, ?)
                 """,
-                (username, pid, time_str),
+                (canonical_username, pid, time_str),
             )
 
 
 def get_user_completed_problems(username: str) -> list[str]:
+    clean = username.strip().lstrip("@")
     with connection() as db:
         rows = db.execute(
-            "SELECT problem_id FROM user_completed_problems WHERE username=? ORDER BY completed_at DESC",
-            (username,),
+            "SELECT problem_id FROM user_completed_problems WHERE username = ? COLLATE NOCASE ORDER BY completed_at DESC",
+            (clean,),
         ).fetchall()
     return [row["problem_id"] for row in rows]
