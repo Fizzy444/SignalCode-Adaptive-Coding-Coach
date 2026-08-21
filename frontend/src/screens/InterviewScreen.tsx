@@ -58,7 +58,7 @@ export default function InterviewScreen({
 }: InterviewScreenProps) {
   // Left Panel Tabs: "statement" or "coach"
   const [leftTab, setLeftTab] = useState<"statement" | "coach">("statement");
-  
+
   // Resizing state
   const [leftWidth, setLeftWidth] = useState<number>(() => {
     return Number(localStorage.getItem("sc_left_width")) || 380;
@@ -79,10 +79,10 @@ export default function InterviewScreen({
   const haloState: HaloState = evaluating
     ? "evaluating"
     : runResult?.passed
-    ? "celebrating"
-    : messages.length > 0 && messages[messages.length - 1]?.type === "coach"
-    ? "speaking"
-    : "listening";
+      ? "celebrating"
+      : messages.length > 0 && messages[messages.length - 1]?.type === "coach"
+        ? "speaking"
+        : "listening";
 
   // Mouse move listener for dragging resizers
   useEffect(() => {
@@ -117,23 +117,121 @@ export default function InterviewScreen({
     }
   }, [messages, leftTab]);
 
-  // Format Elapsed Time (MM:SS)
-  const formatTime = (secs: number) => {
-    const mins = Math.floor(secs / 60);
-    const rem = secs % 60;
-    return `${String(mins).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+  // Helper to format problem description text cleanly
+  const renderFormattedDescription = (text: string) => {
+    if (!text) return null;
+    // Strip code fence markers, all asterisks, and follow-up sections
+    let cleaned = text
+      .replace(/```+/g, "")
+      .replace(/\*/g, "")
+      .trim();
+
+    // Remove Follow-up section if present
+    cleaned = cleaned.split(/\bFollow-up:/i)[0].trim();
+
+    // If description has embedded "Example 1:", strip it up to Constraints
+    if (/Example(?:\s+\d+)?:/i.test(cleaned) && problem.examples && problem.examples.length > 0) {
+      const constraintsMatch = cleaned.match(/\b(Constraints:.*)/is);
+      const constraintsText = constraintsMatch ? constraintsMatch[1].trim() : "";
+      const introParts = cleaned.split(/\bExample(?:\s+\d+)?:/i);
+      const introText = introParts[0] ? introParts[0].trim() : cleaned;
+      cleaned = introText + (constraintsText ? `\n\n${constraintsText}` : "");
+    }
+
+    const lines = cleaned.split("\n");
+    const elements: React.ReactNode[] = [];
+    let currentBullets: string[] = [];
+
+    const flushBullets = (keyIdx: number) => {
+      if (currentBullets.length > 0) {
+        elements.push(
+          <ul key={`b-${keyIdx}`} style={{ paddingLeft: "20px", margin: "6px 0 12px", display: "flex", flexDirection: "column", gap: "5px" }}>
+            {currentBullets.map((b, i) => (
+              <li key={i} style={{ color: "var(--text-secondary)", fontSize: "13px", lineHeight: "1.5" }}>
+                {b}
+              </li>
+            ))}
+          </ul>
+        );
+        currentBullets = [];
+      }
+    };
+
+    lines.forEach((line, idx) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushBullets(idx);
+        return;
+      }
+
+      if (trimmed.toLowerCase().startsWith("follow-up:")) {
+        flushBullets(idx);
+        return;
+      }
+
+      if (trimmed.startsWith("•") || trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+        currentBullets.push(trimmed.replace(/^[•\-\*]\s*/, ""));
+        return;
+      }
+
+      flushBullets(idx);
+
+      const lower = trimmed.toLowerCase();
+      if (lower.startsWith("constraints:") || lower.startsWith("note:")) {
+        elements.push(
+          <div key={idx} style={{ fontWeight: 700, fontSize: "12.5px", color: "var(--text-1)", marginTop: "14px", marginBottom: "4px", textTransform: "capitalize" }}>
+            {trimmed}
+          </div>
+        );
+      } else {
+        elements.push(
+          <p key={idx} style={{ color: "var(--text-primary)", fontSize: "13.5px", lineHeight: "1.6", marginBottom: "8px" }}>
+            {trimmed}
+          </p>
+        );
+      }
+    });
+
+    flushBullets(lines.length);
+    return elements;
   };
 
-  const handleExecute = async () => {
-    setEvaluating(true);
-    setOutput("Evaluating code across test suite...");
-    setRunResult({ output: "Evaluating code across test suite...", passed: null });
+  const [runMode, setRunMode] = useState<"run" | "submit">("run");
 
-    const testCasesToRun = problem.test_cases || problem.examples || [];
+  const handleExecute = async (mode: "run" | "submit" = "run") => {
+    setRunMode(mode);
+    setEvaluating(true);
+
+    // Visible examples shown on the front panel (strictly the first 2 examples)
+    const visibleExamples = (problem.examples && problem.examples.length > 0
+      ? problem.examples
+      : (problem.test_cases || [])
+    ).slice(0, 2);
+
+    // Full test suite for submission (all 6+ test cases)
+    const fullTestSuite = (problem.test_cases && problem.test_cases.length > 0
+      ? problem.test_cases
+      : (problem.examples || [])
+    );
+
+    const testCasesToRun = mode === "run" ? visibleExamples : fullTestSuite;
+
+    setOutput(mode === "submit" ? "Running full test suite for submission..." : "Running example test cases...");
+    setRunResult({ output: mode === "submit" ? "Running full test suite for submission..." : "Running example test cases...", passed: null });
+
     try {
       const result = await runCode(language, code, problem.id, testCasesToRun);
       setRunResult(result);
       setOutput(result.output);
+
+      // Auto-switch active tab to the first failing test case if any
+      const firstFailIdx = result.test_results?.findIndex((t) => !t.passed) ?? -1;
+      if (firstFailIdx >= 0) {
+        setActiveTestCaseIndex(firstFailIdx);
+      } else {
+        setActiveTestCaseIndex(0);
+      }
+
       onRunSuccess(result);
     } catch (err: any) {
       const failedResult: CodeRunResult = {
@@ -156,11 +254,11 @@ export default function InterviewScreen({
   };
 
   // Determine Current Interview Stage
-  const currentStage = runResult?.passed
+  const currentStage = runResult?.passed && runMode === "submit"
     ? "Debrief"
     : messages.some((m) => m.type === "coach" && m.level === "hint") || code.length > 50
-    ? "Coding Round"
-    : "Warm-up";
+      ? "Coding Round"
+      : "Warm-up";
 
   return (
     <div className="interview-workspace">
@@ -251,7 +349,7 @@ export default function InterviewScreen({
               }}
               onClick={() => setLeftTab("statement")}
             >
-              📄 Problem Statement
+              Problem Statement
             </button>
             <button
               className={`filter-item-btn ${leftTab === "coach" ? "active" : ""}`}
@@ -266,12 +364,7 @@ export default function InterviewScreen({
               onClick={() => setLeftTab("coach")}
             >
               <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                <span>🎙️ AI Interviewer</span>
-                {messages.length > 0 && (
-                  <span style={{ fontSize: "10px", padding: "1px 6px", borderRadius: "var(--radius-full)", background: "var(--state-violet)", color: "#fff" }}>
-                    {messages.length}
-                  </span>
-                )}
+                <span>AI Assistant</span>
               </div>
             </button>
           </div>
@@ -305,18 +398,18 @@ export default function InterviewScreen({
 
               {/* Problem Description */}
               <div style={{ background: "var(--surface)", border: "1px solid var(--glass-border)", borderRadius: "var(--radius-md)", padding: "16px" }}>
-                <div className="filter-group-title" style={{ marginBottom: "8px" }}>Description</div>
-                <p style={{ color: "var(--text-primary)", fontSize: "14px", lineHeight: "1.6", whiteSpace: "pre-wrap" }}>
-                  {problem.description}
-                </p>
+                <div className="filter-group-title" style={{ marginBottom: "10px" }}>Description</div>
+                <div>
+                  {renderFormattedDescription(problem.description)}
+                </div>
               </div>
 
-              {/* Examples */}
+              {/* Examples (Visible in problem statement) */}
               {problem.examples && problem.examples.length > 0 && (
                 <div>
                   <div className="filter-group-title" style={{ marginBottom: "10px" }}>Examples</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                    {problem.examples.map((ex, idx) => (
+                    {problem.examples.slice(0, 2).map((ex, idx) => (
                       <div
                         key={idx}
                         style={{ background: "var(--surface)", border: "1px solid var(--glass-border)", borderRadius: "var(--radius-md)", padding: "12px 14px", fontSize: "13px" }}
@@ -324,13 +417,13 @@ export default function InterviewScreen({
                         <div style={{ fontWeight: 600, color: "var(--text-muted)", fontSize: "11px", marginBottom: "6px" }}>
                           Example {idx + 1}
                         </div>
-                        <div style={{ marginBottom: "4px" }}>
+                        <div style={{ marginBottom: "6px" }}>
                           <strong style={{ color: "var(--text-secondary)" }}>Input: </strong>
-                          <code style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{ex.input}</code>
+                          <code style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)", background: "rgba(255,255,255,0.04)", padding: "2px 6px", borderRadius: "4px" }}>{ex.input}</code>
                         </div>
                         <div>
                           <strong style={{ color: "var(--text-secondary)" }}>Output: </strong>
-                          <code style={{ fontFamily: "var(--font-mono)", color: "var(--state-cyan)" }}>{ex.output}</code>
+                          <code style={{ fontFamily: "var(--font-mono)", color: "var(--state-cyan)", background: "rgba(56,189,248,0.08)", padding: "2px 6px", borderRadius: "4px" }}>{ex.output}</code>
                         </div>
                       </div>
                     ))}
@@ -344,7 +437,7 @@ export default function InterviewScreen({
                   Need guidance on the approach?
                 </span>
                 <button className="btn-ghost" style={{ fontSize: "11px", padding: "4px 10px" }} onClick={() => setLeftTab("coach")}>
-                  Talk with Interviewer →
+                  Ask AI Assistant →
                 </button>
               </div>
             </div>
@@ -353,12 +446,11 @@ export default function InterviewScreen({
           {/* TAB 2: AI Coach & Live Transcript View */}
           {leftTab === "coach" && (
             <>
-              {/* Transcript Feed with Mono Timestamps */}
+              {/* Transcript Feed */}
               <div className="transcript-feed">
                 <div className="transcript-entry coach">
                   <div className="transcript-meta">
-                    <span className="transcript-sender">Interviewer</span>
-                    <span className="transcript-time">[00:00]</span>
+                    <span className="transcript-sender">AI Assistant</span>
                   </div>
                   <div className="transcript-body">
                     Welcome to your coding round for <strong>{problem.title}</strong>. Take a moment to read the problem, clarify edge cases, and run your code whenever you're ready.
@@ -372,10 +464,7 @@ export default function InterviewScreen({
                   >
                     <div className="transcript-meta">
                       <span className="transcript-sender">
-                        {msg.type === "user" ? "You" : "Interviewer"}
-                      </span>
-                      <span className="transcript-time">
-                        [{formatTime(Math.min(elapsed, (idx + 1) * 35))}]
+                        {msg.type === "user" ? "You" : "AI Assistant"}
                       </span>
                     </div>
                     <div className="transcript-body">{msg.message}</div>
@@ -414,7 +503,7 @@ export default function InterviewScreen({
                 <form className="chat-input-form" onSubmit={handleChatSubmit}>
                   <input
                     type="text"
-                    placeholder="Talk to interviewer or ask questions..."
+                    placeholder="Talk to AI assistant or ask questions..."
                     className="chat-input"
                     value={chatText}
                     onChange={(e) => setChatText(e.target.value)}
@@ -468,21 +557,40 @@ export default function InterviewScreen({
 
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               <button
-                className="btn-amber"
-                style={{ padding: "6px 14px", fontSize: "12px" }}
-                onClick={handleExecute}
+                className="btn-ghost"
+                style={{ padding: "6px 14px", fontSize: "12px", border: "1px solid var(--border-soft)" }}
+                onClick={() => handleExecute("run")}
                 disabled={evaluating}
+                title="Run visible example test cases"
               >
-                ▶ Run code
+                {evaluating && runMode === "run" ? "Running..." : "▶ Run"}
               </button>
 
-              {runResult?.passed && (
+              {runMode === "submit" && runResult?.passed ? (
+                <button
+                  className="btn-cyan"
+                  style={{
+                    padding: "6px 18px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    background: "linear-gradient(135deg, #10b981 0%, #06b6d4 100%)",
+                    color: "#fff",
+                    boxShadow: "0 0 12px rgba(16, 185, 129, 0.4)",
+                  }}
+                  onClick={onSubmitSolution}
+                  title="Submission Accepted! Click to finish interview and view report"
+                >
+                  Continue →
+                </button>
+              ) : (
                 <button
                   className="btn-cyan"
                   style={{ padding: "6px 16px", fontSize: "12px" }}
-                  onClick={onSubmitSolution}
+                  onClick={() => handleExecute("submit")}
+                  disabled={evaluating}
+                  title="Run all test cases and submit solution"
                 >
-                  ✓ Submit solution
+                  {evaluating && runMode === "submit" ? "Submitting..." : "✓ Submit"}
                 </button>
               )}
             </div>
@@ -525,15 +633,24 @@ export default function InterviewScreen({
           >
             <div className="console-header">
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <span>Test Execution & Output</span>
-                {runResult && (
+                <span>{runMode === "submit" ? "Submission Result" : "Test Execution & Output"}</span>
+                {runResult && runResult.passed !== null && (
                   <span
                     style={{
-                      fontSize: "11px",
+                      fontSize: "12px",
+                      fontWeight: 600,
                       color: runResult.passed ? "var(--state-cyan)" : "var(--state-error)",
                     }}
                   >
-                    {runResult.passed ? "✓ Passed all test cases" : "✕ Test suite failed"}
+                    {runMode === "submit" ? (
+                      runResult.passed
+                        ? `✓ Accepted (${runResult.test_results?.length || 0}/${runResult.test_results?.length || 0} test cases passed)`
+                        : `✕ ${runResult.test_results?.some(t => t.error) ? "Runtime Error" : "Wrong Answer"} (failed on test case ${activeTestCaseIndex + 1} of ${runResult.test_results?.length || 0})`
+                    ) : (
+                      runResult.passed
+                        ? `✓ Example test cases passed (${runResult.test_results?.length || 0}/${runResult.test_results?.length || 0})`
+                        : `✕ Example test case ${activeTestCaseIndex + 1} failed`
+                    )}
                   </span>
                 )}
               </div>
@@ -545,45 +662,60 @@ export default function InterviewScreen({
             <div className="console-body">
               {runResult?.test_results && runResult.test_results.length > 0 ? (
                 <div>
-                  <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
-                    {runResult.test_results.map((tc, idx) => (
-                      <button
-                        key={idx}
-                        className={`filter-item-btn ${activeTestCaseIndex === idx ? "active" : ""}`}
-                        style={{ width: "auto", padding: "4px 10px", fontSize: "11px" }}
-                        onClick={() => setActiveTestCaseIndex(idx)}
-                      >
-                        <span
+                  <div style={{ display: "flex", gap: "8px", marginBottom: "12px", overflowX: "auto", paddingBottom: "2px" }}>
+                    {runResult.test_results.map((tc, idx) => {
+                      const isFailed = !tc.passed;
+                      return (
+                        <button
+                          key={idx}
+                          className={`filter-item-btn ${activeTestCaseIndex === idx ? "active" : ""}`}
                           style={{
-                            color: tc.passed ? "var(--state-cyan)" : "var(--state-error)",
-                            marginRight: "4px",
+                            width: "auto",
+                            padding: "4px 12px",
+                            fontSize: "11px",
+                            borderColor: activeTestCaseIndex === idx
+                              ? (isFailed ? "var(--state-error)" : "var(--state-cyan)")
+                              : (isFailed ? "rgba(240, 106, 106, 0.4)" : "var(--glass-border)"),
                           }}
+                          onClick={() => setActiveTestCaseIndex(idx)}
                         >
-                          {tc.passed ? "✓" : "✕"}
-                        </span>
-                        Case {idx + 1}
-                      </button>
-                    ))}
+                          <span
+                            style={{
+                              color: tc.passed ? "var(--state-cyan)" : "var(--state-error)",
+                              marginRight: "4px",
+                              fontWeight: 700,
+                            }}
+                          >
+                            {tc.passed ? "✓" : "✕"}
+                          </span>
+                          Case {idx + 1}
+                        </button>
+                      );
+                    })}
                   </div>
 
                   {runResult.test_results[activeTestCaseIndex] && (
-                    <div style={{ background: "rgba(0,0,0,0.4)", padding: "12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--glass-border)" }}>
-                      <div style={{ marginBottom: "6px" }}>
-                        <strong style={{ color: "var(--text-secondary)" }}>Input: </strong>
-                        <code>{runResult.test_results[activeTestCaseIndex].input}</code>
-                      </div>
-                      <div style={{ marginBottom: "6px" }}>
-                        <strong style={{ color: "var(--text-secondary)" }}>Expected: </strong>
-                        <code>{runResult.test_results[activeTestCaseIndex].expected}</code>
+                    <div style={{ background: "rgba(0,0,0,0.4)", padding: "14px", borderRadius: "var(--radius-sm)", border: "1px solid var(--glass-border)", display: "flex", flexDirection: "column", gap: "8px" }}>
+                      <div>
+                        <div style={{ fontWeight: 600, color: "var(--text-muted)", fontSize: "11px", marginBottom: "4px" }}>Input:</div>
+                        <pre style={{ margin: 0, fontFamily: "var(--font-mono)", fontSize: "13px", color: "var(--text-primary)", background: "rgba(255,255,255,0.03)", padding: "6px 10px", borderRadius: "4px", whiteSpace: "pre-wrap" }}>
+                          {runResult.test_results[activeTestCaseIndex].input}
+                        </pre>
                       </div>
                       <div>
-                        <strong style={{ color: "var(--text-secondary)" }}>Actual: </strong>
-                        <code style={{ color: runResult.test_results[activeTestCaseIndex].passed ? "var(--state-cyan)" : "var(--state-error)" }}>
-                          {runResult.test_results[activeTestCaseIndex].actual || (runResult.test_results[activeTestCaseIndex].passed ? "None" : "No return value")}
-                        </code>
+                        <div style={{ fontWeight: 600, color: "var(--text-muted)", fontSize: "11px", marginBottom: "4px" }}>Expected Output:</div>
+                        <pre style={{ margin: 0, fontFamily: "var(--font-mono)", fontSize: "13px", color: "var(--state-cyan)", background: "rgba(56,189,248,0.04)", padding: "6px 10px", borderRadius: "4px", whiteSpace: "pre-wrap" }}>
+                          {runResult.test_results[activeTestCaseIndex].expected}
+                        </pre>
+                      </div>
+                      <div>
+                        <div style={{ fontWeight: 600, color: "var(--text-muted)", fontSize: "11px", marginBottom: "4px" }}>Actual Output:</div>
+                        <pre style={{ margin: 0, fontFamily: "var(--font-mono)", fontSize: "13px", color: runResult.test_results[activeTestCaseIndex].passed ? "var(--state-cyan)" : "var(--state-error)", background: runResult.test_results[activeTestCaseIndex].passed ? "rgba(56,189,248,0.04)" : "rgba(240,106,106,0.06)", padding: "6px 10px", borderRadius: "4px", whiteSpace: "pre-wrap" }}>
+                          {runResult.test_results[activeTestCaseIndex].actual || (runResult.test_results[activeTestCaseIndex].passed ? "null" : "No return value")}
+                        </pre>
                       </div>
                       {runResult.test_results[activeTestCaseIndex].error && (
-                        <div style={{ marginTop: "6px", color: "var(--state-error)", fontSize: "12px", background: "rgba(241, 106, 106, 0.08)", padding: "6px 8px", borderRadius: "var(--radius-sm)" }}>
+                        <div style={{ marginTop: "4px", color: "var(--state-error)", fontSize: "12px", background: "rgba(240, 106, 106, 0.08)", border: "1px solid rgba(240, 106, 106, 0.2)", padding: "8px 10px", borderRadius: "var(--radius-sm)" }}>
                           <strong>Error: </strong>
                           <code>{runResult.test_results[activeTestCaseIndex].error}</code>
                         </div>
@@ -592,7 +724,7 @@ export default function InterviewScreen({
                   )}
                 </div>
               ) : (
-                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{output}</pre>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "var(--font-mono)", fontSize: "13px" }}>{output}</pre>
               )}
             </div>
           </div>

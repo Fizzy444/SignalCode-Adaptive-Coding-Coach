@@ -3,12 +3,13 @@ import httpx
 from .config import get_settings
 
 
-SYSTEM_PROMPT = """You are a calm coding interview coach. Never reveal a full solution.
-Give one concise, actionable nudge (maximum 70 words). Use the candidate's code,
+SYSTEM_PROMPT = """You are a calm, expert coding interview coach. Never reveal a full solution.
+Give one concise, actionable nudge (around 40-90 words). Use the candidate's code,
 run result, coarse attention signal, and user messages/explanations. Do not diagnose emotion or mental health.
 Only discuss code that appears verbatim in the supplied code field. Never invent,
 infer, or claim the candidate wrote an implementation that is not present.
-If they are stuck, ask a guiding question. If correct or explaining complexity/invariants, evaluate their explanation constructively and offer one possible improvement or follow-up question. Return plain text only."""
+If they are stuck, ask a guiding question. If correct or explaining complexity/invariants, evaluate their explanation constructively and offer one possible improvement or follow-up question.
+Always complete your thought and finish all your sentences cleanly. Return plain text only."""
 
 
 class AIProvider:
@@ -46,7 +47,7 @@ class OllamaProvider(AIProvider):
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": json.dumps(context)},
                     ],
-                    "options": {"temperature": 0.3, "num_predict": 120},
+                    "options": {"temperature": 0.3, "num_predict": 500},
                 },
             )
             response.raise_for_status()
@@ -69,11 +70,29 @@ class GeminiProvider(AIProvider):
                 json={
                     "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
                     "contents": [{"parts": [{"text": json.dumps(context)}]}],
-                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 512},
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 2048,
+                    },
                 },
             )
             response.raise_for_status()
-            return response.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            res_data = response.json()
+            candidates = res_data.get("candidates", [])
+            if not candidates:
+                raise RuntimeError("No candidate returned by Gemini")
+            
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            # In Gemini 2.5 / thinking models, filter out internal thought parts
+            text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text") and not p.get("thought", False)]
+            if text_parts:
+                return "".join(text_parts).strip()
+            
+            if parts and isinstance(parts[0], dict) and "text" in parts[0]:
+                return parts[0]["text"].strip()
+            
+            raise RuntimeError("Empty response text from Gemini")
 
 
 def get_provider() -> AIProvider:

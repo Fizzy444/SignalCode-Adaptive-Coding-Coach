@@ -40,16 +40,25 @@ export async function addProblem(
 }
 
 export async function importProblem(slug: string): Promise<Problem> {
-  const response = await fetch(`${API_URL}/api/problems/import`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ slug }),
-  });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.detail || "Could not import problem from LeetCode");
+  try {
+    const response = await fetch(`${API_URL}/api/problems/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || `Import failed (${response.status})`);
+    }
+    return response.json();
+  } catch (err: any) {
+    if (err.name === "TypeError" || err.message?.toLowerCase().includes("network")) {
+      throw new Error(
+        "Could not reach the server. Make sure the backend is running on port 8000."
+      );
+    }
+    throw err;
   }
-  return response.json();
 }
 
 export function connectCoach(sessionId: string): WebSocket {

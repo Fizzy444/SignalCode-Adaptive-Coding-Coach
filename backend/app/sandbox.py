@@ -145,10 +145,21 @@ _signalcode_tests = json.loads({repr(tc_json)})
 _signalcode_results = []
 
 _candidates = [_val for _name, _val in list(globals().items()) if callable(_val) and not _name.startswith("_") and hasattr(_val, "__code__") and hasattr(_val, "__module__") and _val.__module__ == __name__]
+
+# Also search inside a Solution class (LeetCode import pattern)
+_solution_class = globals().get("Solution")
+if _solution_class and isinstance(_solution_class, type):
+    _solution_instance = _solution_class()
+    for _mname in dir(_solution_instance):
+        if not _mname.startswith("_"):
+            _mval = getattr(_solution_instance, _mname)
+            if callable(_mval) and hasattr(_mval, "__func__"):
+                _candidates.append(_mval)
+
 _candidate_fn = None
 
 for _idx, _tc in enumerate(_signalcode_tests):
-    _name = _tc.get("name") or f"Test {{_idx + 1}}"
+    _name = _tc.get("name") or ("Test " + str(_idx + 1))
     _input_str = _tc.get("input", "").strip()
     _expected_str = _tc.get("expected") or _tc.get("output", "")
     _actual_str = ""
@@ -157,7 +168,7 @@ for _idx, _tc in enumerate(_signalcode_tests):
     _tc_stdout = ""
     try:
         if not _candidates:
-            raise RuntimeError("No top-level function found to test.")
+            raise RuntimeError("No top-level function or Solution method found to test.")
         
         _scope = dict(globals())
         _scope["ListNode"] = ListNode
@@ -168,9 +179,11 @@ for _idx, _tc in enumerate(_signalcode_tests):
             _lines = []
             _curr = []
             _depth = 0
+            _open_brackets = "([<" + chr(123)
+            _close_brackets = ")]>" + chr(125)
             for _char in _input_str:
-                if _char in "[{{(": _depth += 1
-                elif _char in "]}})": _depth -= 1
+                if _char in _open_brackets: _depth += 1
+                elif _char in _close_brackets: _depth -= 1
                 if _char == "," and _depth == 0:
                     _lines.append("".join(_curr).strip())
                     _curr = []
@@ -182,12 +195,16 @@ for _idx, _tc in enumerate(_signalcode_tests):
             exec(_exec_str, _scope, _user_vars)
             _args = list(_user_vars.values())
         else:
-            _eval_val = eval(f"({{_input_str}},)", _scope, {{}}) if _input_str else ()
+            _eval_val = eval("(" + _input_str + ",)", _scope, dict()) if _input_str else ()
             _args = list(_eval_val)
             
         _candidate_fn = None
         for _fn in reversed(_candidates):
-            if _fn.__code__.co_argcount == len(_args):
+            _argcount = _fn.__code__.co_argcount if hasattr(_fn, "__code__") else 0
+            # Bound methods: argcount includes self, so subtract 1
+            _is_bound = hasattr(_fn, "__self__")
+            _effective_argc = _argcount - (1 if _is_bound else 0)
+            if _effective_argc == len(_args):
                 _candidate_fn = _fn
                 break
         if not _candidate_fn:
@@ -238,7 +255,7 @@ for _idx, _tc in enumerate(_signalcode_tests):
             _passed = False
     except Exception as _e:
         _passed = False
-        _error = f"{{type(_e).__name__}}: {{str(_e)}}"
+        _error = type(_e).__name__ + ": " + str(_e)
         
     _signalcode_results.append({{
         "name": _name,
