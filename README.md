@@ -26,7 +26,6 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-Copy-Item .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -46,7 +45,6 @@ For Gemini, set `AI_PROVIDER=gemini` and `GEMINI_API_KEY` in `backend/.env`.
 ```powershell
 cd frontend
 npm install
-Copy-Item .env.example .env
 npm run dev
 ```
 

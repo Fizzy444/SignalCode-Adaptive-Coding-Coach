@@ -1,31 +1,37 @@
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
-import { loginUser } from "./api";
+import { signupUser } from "./api";
 import type { User } from "./types";
 
-interface LoginProps {
-  onLogin: (user: User) => void;
+interface SignupProps {
+  onSignup: (user: User) => void;
 }
 
-export default function Login({ onLogin }: LoginProps) {
+export default function Signup({ onSignup }: SignupProps) {
   const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!username.trim() || !password.trim()) {
-      setError("Please enter both username and password.");
+    if (!username.trim() || !email.trim() || !password.trim() || !confirmPassword.trim()) {
+      setError("Please fill out all fields.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError("Passwords do not match.");
       return;
     }
     setLoading(true);
     setError("");
     try {
-      const user = await loginUser(username.trim(), password);
-      onLogin(user);
+      const user = await signupUser(username.trim(), email.trim(), password);
+      onSignup(user);
     } catch (err: any) {
-      setError(err.message || "Failed to log in.");
+      setError(err.message || "Failed to sign up.");
     } finally {
       setLoading(false);
     }
@@ -52,9 +58,9 @@ export default function Login({ onLogin }: LoginProps) {
               <span className="hero-pill-dot" />
               Private AI Coach Account
             </div>
-            <h1 className="auth-title">Welcome back</h1>
+            <h1 className="auth-title">Create an account</h1>
             <p className="auth-subtitle">
-              Enter your username and password to log in.
+              Enter a username and password to create a new account.
             </p>
           </div>
 
@@ -77,6 +83,20 @@ export default function Login({ onLogin }: LoginProps) {
             </div>
 
             <div className="form-input-group">
+              <label className="label" htmlFor="email-input">Email</label>
+              <input
+                id="email-input"
+                type="email"
+                className="form-input"
+                placeholder="e.g. alex@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                disabled={loading}
+                required
+              />
+            </div>
+
+            <div className="form-input-group">
               <label className="label" htmlFor="password-input">Password</label>
               <input
                 id="password-input"
@@ -90,18 +110,32 @@ export default function Login({ onLogin }: LoginProps) {
               />
             </div>
 
+            <div className="form-input-group">
+              <label className="label" htmlFor="confirm-password-input">Confirm Password</label>
+              <input
+                id="confirm-password-input"
+                type="password"
+                className="form-input"
+                placeholder="••••••••••••"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                disabled={loading}
+                required
+              />
+            </div>
+
             <button
               type="submit"
               className="btn-primary auth-submit-btn"
-              disabled={loading || !username.trim() || !password.trim()}
+              disabled={loading || !username.trim() || !email.trim() || !password.trim() || !confirmPassword.trim()}
             >
-              {loading ? "Authenticating..." : "Continue →"}
+              {loading ? "Creating account..." : "Sign Up →"}
             </button>
           </form>
 
           <div className="auth-footer">
             <p className="mono" style={{ fontSize: "14px", color: "var(--text)", marginBottom: "12px" }}>
-              Don't have an account? <Link to="/signup" style={{ color: "var(--accent)" }}>Sign up here</Link>.
+              Already have an account? <Link to="/login" style={{ color: "var(--accent)" }}>Log in here</Link>.
             </p>
             <p className="mono" style={{ fontSize: "12px", color: "var(--text-3)" }}>
               🔒 Secure on-device & interview privacy guaranteed.

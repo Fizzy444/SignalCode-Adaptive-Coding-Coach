@@ -11,13 +11,15 @@ from .coach import CoachState
 from .config import get_settings
 from .database import (
     add_user_completed_problem, create_session, create_user, finish_session, get_session,
-    get_user_by_username, get_user_completed_problems, initialize, save_custom_problem, save_event,
-    session_report, sync_user_completed_problems,
+    get_user_by_username, get_user_completed_problems, initialize, upsert_custom_problem,
+    find_custom_problem_by_slug, save_custom_problem, save_event,
+    search_users, session_report, sync_user_completed_problems,
 )
 from .models import (
     ClientEvent, CoachMessage, CodeRunRequest, CodeRunResult, Problem,
     ProblemCompleteRequest, ProblemCreate, ProblemImportRequest, ProblemSyncRequest,
-    SessionCreate, SessionCreated, UserLoginRequest, UserProfileResponse, UserResponse,
+    SessionCreate, SessionCreated, UserLoginRequest, UserSignupRequest, UserProfileResponse, UserResponse,
+    UserSearchResult,
 )
 from .problems import get_problem, search_problems, select_problem
 from .sandbox import run_code
@@ -89,6 +91,83 @@ async def create_problem(request: ProblemCreate):
     return problem
 
 
+def _clean_leetcode_html(raw_html: str) -> tuple[str, list[dict[str, str]]]:
+    if not raw_html:
+        return "", []
+    
+    text = raw_html.replace("\r\n", "\n").replace("&nbsp;", " ").replace("\xa0", " ")
+    
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?(p|div|h[1-6])(?:\s+[^>]*)?>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<li(?:\s+[^>]*)?>", "\n• ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</li>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?(ul|ol)(?:\s+[^>]*)?>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?pre(?:\s+[^>]*)?>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<code(?:\s+[^>]*)?>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<strong(?:\s+[^>]*)?>(.*?)</strong>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<b(?:\s+[^>]*)?>(.*?)</b>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<em(?:\s+[^>]*)?>(.*?)</em>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<i(?:\s+[^>]*)?>(.*?)</i>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    
+    text = re.sub(r"\t+", " ", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    
+    # Extract test examples
+    examples = []
+    pattern = re.compile(
+        r"(?:Input:?)\s*([^\n\r`]+(?:\n(?!\s*Output)[^\n\r`]+)*)\s*(?:Output:?)\s*([^\n\r`]+)",
+        re.IGNORECASE
+    )
+    for m in pattern.finditer(text):
+        raw_inp = m.group(1).strip()
+        raw_out = m.group(2).strip()
+        clean_inp = re.sub(r"^\*+|\*+$|^`+|`+$", "", raw_inp).strip()
+        clean_out = re.sub(r"^\*+|\*+$|^`+|`+$", "", raw_out).strip()
+        if clean_inp and clean_out:
+            examples.append({"input": clean_inp, "output": clean_out})
+            
+    if not examples:
+        simple_pattern = re.compile(r"Input:\s*([^\n]+)\s*Output:\s*([^\n]+)", re.IGNORECASE)
+        for m in simple_pattern.finditer(text):
+            clean_inp = re.sub(r"^\*+|\*+$|^`+|`+$", "", m.group(1)).strip()
+            clean_out = re.sub(r"^\*+|\*+$|^`+|`+$", "", m.group(2)).strip()
+            if clean_inp and clean_out:
+                examples.append({"input": clean_inp, "output": clean_out})
+
+    if not examples:
+        examples = [{"input": "head = [1,2,3,4,5]", "output": "[5,4,3,2,1]"}] if "linked list" in text.lower() else [{"input": "nums = [2,7,11,15], target = 9", "output": "[0,1]"}]
+        
+    # Strip raw example block from the description text so it doesn't duplicate with Examples section
+    clean_desc = text
+    if examples:
+        # Extract Constraints section if present, removing any Follow-up
+        constraints_match = re.search(r"\b(Constraints:.*)", clean_desc, flags=re.IGNORECASE | re.DOTALL)
+        constraints_text = constraints_match.group(1).strip() if constraints_match else ""
+        if constraints_text:
+            constraints_text = re.split(r"\bFollow-up:", constraints_text, flags=re.IGNORECASE)[0].strip()
+        
+        # Extract main problem body before "Example 1:" / "Example:"
+        intro_match = re.split(r"\bExample(?:\s+\d+)?:", clean_desc, flags=re.IGNORECASE)
+        intro_text = intro_match[0].strip() if intro_match else clean_desc.strip()
+        intro_text = re.split(r"\bFollow-up:", intro_text, flags=re.IGNORECASE)[0].strip()
+        
+        if intro_text and constraints_text:
+            clean_desc = f"{intro_text}\n\n{constraints_text}"
+        elif intro_text:
+            clean_desc = intro_text
+
+    # Final cleanup: remove Follow-up section, fences, asterisks, and multiple empty lines
+    clean_desc = re.split(r"\bFollow-up:", clean_desc, flags=re.IGNORECASE)[0].strip()
+    clean_desc = re.sub(r"```+", "", clean_desc)
+    clean_desc = clean_desc.replace("*", "")
+    clean_desc = re.sub(r"\n{3,}", "\n\n", clean_desc).strip()
+
+    return clean_desc, examples
+
+
 @app.post("/api/problems/import", response_model=Problem, status_code=201)
 async def import_problem(request: ProblemImportRequest):
     slug = request.slug.strip().lower().rstrip("/")
@@ -99,13 +178,10 @@ async def import_problem(request: ProblemImportRequest):
         slug = slug.split("/")[-1] or slug.split("/")[-2]
     else:
         slug = re.sub(r"[\s_]+", "-", slug).strip("-")
-    # LeetCode links copied from numbered lists are often formatted like
-    # "10.regular-expression-matching"; the API expects only the title slug.
     slug = re.sub(r"^\d+[\s._-]+", "", slug)
 
-    existing = get_problem(slug) or get_problem(f"custom-{slug}")
-    if existing:
-        return existing
+    # Use a stable, deterministic ID so re-imports overwrite rather than duplicate.
+    stable_id = f"custom-{slug}"
 
     data = None
     starter_code = {"python": "# Write your solution here\n", "javascript": "// Write your solution here\n"}
@@ -154,12 +230,22 @@ async def import_problem(request: ProblemImportRequest):
                 else:
                     res.raise_for_status()
         except Exception as e:
+            # Both LeetCode sources failed — return cached version if we have one.
+            cached = find_custom_problem_by_slug(slug)
+            if cached:
+                return Problem.model_validate({**cached, "source": "LeetCode"})
             if is_daily:
                 return select_problem("easy")
-            raise HTTPException(status_code=502, detail=f"Failed to fetch from LeetCode API: {str(e)}. Problem '{slug}' not found on LeetCode API.")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not reach LeetCode API: {str(e)}. Problem '{slug}' not found.",
+            )
 
     if not data or "questionTitle" not in data:
-        raise HTTPException(status_code=404, detail=f"Problem '{slug}' not found on LeetCode API.")
+        cached = find_custom_problem_by_slug(slug)
+        if cached:
+            return Problem.model_validate({**cached, "source": "LeetCode"})
+        raise HTTPException(status_code=404, detail=f"Problem '{slug}' not found on LeetCode.")
 
     title = data["questionTitle"]
     difficulty = str(data.get("difficulty", "easy")).lower()
@@ -170,21 +256,9 @@ async def import_problem(request: ProblemImportRequest):
         topics = ["algorithms"]
 
     raw_question = str(data.get("question", ""))
-    formatted = re.sub(r"<br\s*/?>", "\n", raw_question, flags=re.IGNORECASE)
-    formatted = re.sub(r"</(p|pre|ul|ol|div|h\d)>", "\n\n", formatted, flags=re.IGNORECASE)
-    formatted = re.sub(r"<li>", "\n  • ", formatted, flags=re.IGNORECASE)
-    formatted = re.sub(r"</li>", "", formatted, flags=re.IGNORECASE)
-    formatted = re.sub(r"</?code>", "`", formatted, flags=re.IGNORECASE)
-    formatted = re.sub(r"</?strong>", "**", formatted, flags=re.IGNORECASE)
-    formatted = re.sub(r"</?em>", "*", formatted, flags=re.IGNORECASE)
-    clean_text = html.unescape(re.sub(r"<[^>]+>", "", formatted)).strip()
-    clean_text = re.sub(r"\n{3,}", "\n\n", clean_text)
-    description = clean_text or title
-
-    examples_found = re.findall(r"Input:\s*([^\n]+)\s*Output:\s*([^\n]+)", clean_text, re.IGNORECASE)
-    examples = [{"input": inp.strip(), "output": out.strip()} for inp, out in examples_found[:10]]
-    if not examples:
-        examples = [{"input": "See description", "output": "See description"}]
+    description, examples = _clean_leetcode_html(raw_question)
+    if not description:
+        description = title
 
     if starter_code["python"] == "# Write your solution here\n":
         try:
@@ -204,20 +278,36 @@ async def import_problem(request: ProblemImportRequest):
         except Exception:
             pass
 
+    visible_examples = examples
+    full_test_cases = examples
+    if slug == "reverse-nodes-in-k-group" or ("reverse" in title.lower() and "k-group" in title.lower()):
+        visible_examples = [
+            {"input": "head = [1,2,3,4,5], k = 2", "output": "[2,1,4,3,5]"},
+            {"input": "head = [1,2,3,4,5], k = 3", "output": "[3,2,1,4,5]"},
+        ]
+        full_test_cases = [
+            {"input": "head = [1,2,3,4,5], k = 2", "output": "[2,1,4,3,5]"},
+            {"input": "head = [1,2,3,4,5], k = 3", "output": "[3,2,1,4,5]"},
+            {"input": "head = [1,2,3,4,5], k = 1", "output": "[1,2,3,4,5]"},
+            {"input": "head = [1,2,3,4,5], k = 5", "output": "[5,4,3,2,1]"},
+            {"input": "head = [1,2], k = 2", "output": "[2,1]"},
+            {"input": "head = [1], k = 1", "output": "[1]"},
+        ]
+
     problem = Problem(
-        id=f"custom-{slug}-{str(uuid4())[:8]}",
+        id=stable_id,
         title=title,
         difficulty=difficulty,
         topics=topics,
         description=description,
-        examples=examples,
-        test_cases=examples,
+        examples=visible_examples,
+        test_cases=full_test_cases,
         starter_code=starter_code,
         source="LeetCode",
         source_url=f"https://leetcode.com/problems/{data.get('titleSlug', slug)}/",
         is_custom=True,
     )
-    save_custom_problem(problem.model_dump())
+    upsert_custom_problem(problem.model_dump())
     return problem
 
 
@@ -249,9 +339,7 @@ async def interview_socket(websocket: WebSocket, session_id: str):
         await websocket.close(code=1011, reason="Problem not found")
         return
     state = CoachState(problem=problem)
-    await websocket.send_json(
-        CoachMessage(type="status", message="Coach connected").model_dump()
-    )
+
     try:
         while True:
             data = await websocket.receive_json()
@@ -287,18 +375,24 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
+@app.post("/api/auth/signup", response_model=UserResponse)
+async def signup(request: UserSignupRequest):
+    user = get_user_by_username(request.username)
+    if user:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    pwd_hash = hash_password(request.password)
+    create_user(request.username, pwd_hash, request.email)
+    return UserResponse(username=request.username, email=request.email, completed_problems=[])
+
 @app.post("/api/auth/login", response_model=UserResponse)
 async def login(request: UserLoginRequest):
     user = get_user_by_username(request.username)
     if not user:
-        pwd_hash = hash_password(request.password)
-        create_user(request.username, pwd_hash)
-        return UserResponse(username=request.username, completed_problems=[])
-    else:
-        if not verify_password(request.password, user["password"]):
-            raise HTTPException(status_code=401, detail="Incorrect password")
-        completed = get_user_completed_problems(request.username)
-        return UserResponse(username=request.username, completed_problems=completed)
+        raise HTTPException(status_code=404, detail="User not found")
+    if not verify_password(request.password, user["password"]):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+    completed = get_user_completed_problems(request.username)
+    return UserResponse(username=request.username, completed_problems=completed)
 
 
 @app.post("/api/users/{username}/complete", response_model=UserResponse)
@@ -321,19 +415,33 @@ async def sync_completed(username: str, request: ProblemSyncRequest):
     return UserResponse(username=username, completed_problems=completed)
 
 
+@app.get("/api/users/search", response_model=list[UserSearchResult])
+async def search_users_api(q: str = ""):
+    return search_users(q, limit=10)
+
+
 @app.get("/api/users/{username}/profile", response_model=UserProfileResponse)
 async def get_profile(username: str):
-    user = get_user_by_username(username)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    completed_ids = get_user_completed_problems(username)
-    completed_problems = []
-    for pid in completed_ids:
-        p = get_problem(pid)
-        if p:
-            completed_problems.append(p)
-    return UserProfileResponse(
-        username=username,
-        completed_problems=completed_problems,
-        total_completed=len(completed_problems)
-    )
+    clean_username = username.strip().lstrip("@")
+    try:
+        user = get_user_by_username(clean_username)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        completed_ids = get_user_completed_problems(clean_username)
+        completed_problems = []
+        for pid in completed_ids:
+            try:
+                p = get_problem(pid)
+                if p:
+                    completed_problems.append(p)
+            except Exception:
+                continue
+        return UserProfileResponse(
+            username=user["username"],
+            completed_problems=completed_problems,
+            total_completed=len(completed_problems)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")

@@ -1,4 +1,4 @@
-export type Language = "python" | "javascript" | "java";
+export type Language = "python" | "javascript" | "java" | "c" | "cpp";
 
 export interface TestCaseResult {
   name: string;
@@ -7,6 +7,7 @@ export interface TestCaseResult {
   actual: string;
   passed: boolean;
   error?: string | null;
+  stdout?: string;
 }
 
 export interface CodeRunResult {
@@ -57,5 +58,11 @@ export interface UserProfile {
   username: string;
   completed_problems: Problem[];
   total_completed: number;
+}
+
+export interface UserSearchResult {
+  username: string;
+  total_completed: number;
+  created_at?: string;
 }
 

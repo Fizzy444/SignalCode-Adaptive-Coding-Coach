@@ -1,4 +1,4 @@
-import type { Language, Problem, User, UserProfile } from "./types";
+import type { Language, Problem, User, UserProfile, UserSearchResult } from "./types";
 
 const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
 const wsProtocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -40,16 +40,25 @@ export async function addProblem(
 }
 
 export async function importProblem(slug: string): Promise<Problem> {
-  const response = await fetch(`${API_URL}/api/problems/import`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ slug }),
-  });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(data.detail || "Could not import problem from LeetCode");
+  try {
+    const response = await fetch(`${API_URL}/api/problems/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || `Import failed (${response.status})`);
+    }
+    return response.json();
+  } catch (err: any) {
+    if (err.name === "TypeError" || err.message?.toLowerCase().includes("network")) {
+      throw new Error(
+        "Could not reach the server. Make sure the backend is running on port 8000."
+      );
+    }
+    throw err;
   }
-  return response.json();
 }
 
 export function connectCoach(sessionId: string): WebSocket {
@@ -65,6 +74,19 @@ export async function loginUser(username: string, password: string): Promise<Use
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.detail || "Authentication failed");
+  }
+  return response.json();
+}
+
+export async function signupUser(username: string, email: string, password: string): Promise<User> {
+  const response = await fetch(`${API_URL}/api/auth/signup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, email, password }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || "Sign up failed");
   }
   return response.json();
 }
@@ -90,8 +112,19 @@ export async function syncCompletedProblemsUser(username: string, problemIds: st
 }
 
 export async function getUserProfile(username: string): Promise<UserProfile> {
-  const response = await fetch(`${API_URL}/api/users/${encodeURIComponent(username)}/profile`);
-  if (!response.ok) throw new Error("Could not load user profile");
+  const clean = username.trim().replace(/^@+/, "");
+  const response = await fetch(`${API_URL}/api/users/${encodeURIComponent(clean)}/profile`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || "Could not load user profile");
+  }
+  return response.json();
+}
+
+export async function searchUsers(query: string): Promise<UserSearchResult[]> {
+  const clean = query.trim().replace(/^@+/, "");
+  const response = await fetch(`${API_URL}/api/users/search?q=${encodeURIComponent(clean)}`);
+  if (!response.ok) return [];
   return response.json();
 }
 
